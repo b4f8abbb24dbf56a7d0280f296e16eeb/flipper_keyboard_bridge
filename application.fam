@@ -1,0 +1,14 @@
+App(
+    appid="ble_kb_bridge",
+    name="BLE Keyboard Bridge",
+    apptype=FlipperAppType.EXTERNAL,
+    entry_point="ble_kb_bridge_app",
+    sources=["main.c"],
+    requires=["gui"],
+    fap_libs=["ble_profile"],
+    stack_size=4 * 1024,
+    fap_category="Tools",
+    fap_version="1.0",
+    fap_description="Forward Web Bluetooth keystrokes to a host as USB HID",
+    fap_author="flipper_keyboard_bridge",
+)

@@ -1,0 +1,8 @@
+{
+    "name": "flipper-keyboard-bridge-web",
+    "private": true,
+    "type": "module",
+    "scripts": {
+        "test": "node --test hid.test.mjs"
+    }
+}

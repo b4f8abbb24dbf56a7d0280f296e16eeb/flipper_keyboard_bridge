@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <meta name="theme-color" content="#0c0f12" />
+        <title>BLE Keyboard Bridge — Flipper Zero</title>
+        <link rel="stylesheet" href="style.css" />
+        <script type="module" src="app.js"></script>
+    </head>
+    <body>
+        <main class="shell">
+            <header class="hero">
+                <div class="brand">
+                    <span class="brand-mark" aria-hidden="true">⌨</span>
+                    <span>BLE Keyboard Bridge</span>
+                </div>
+                <h1>Type anywhere.<br /><span>Through your Flipper.</span></h1>
+                <p class="lede">
+                    Chrome captures a physical keyboard over Web Bluetooth, sends key states to the
+                    Flipper, and the Flipper types them into the USB host as a real HID keyboard.
+                </p>
+                <div class="support-note">
+                    Chrome / Edge on desktop, or Chrome on Android. Web Bluetooth requires a
+                    secure page; this one is published via GitHub Pages.
+                </div>
+            </header>
+
+            <div id="supportWarning" class="warning" hidden role="alert"></div>
+
+            <div class="top-grid">
+                <section class="card connection-card" aria-labelledby="connection-title">
+                    <div class="card-kicker">Connection</div>
+                    <h2 id="connection-title" class="card-title">Flipper link</h2>
+
+                    <div class="status-row" role="status" aria-live="polite">
+                        <span id="statusDot" class="status-dot status-dot--offline"></span>
+                        <div class="status-copy">
+                            <strong id="statusText">Not connected</strong>
+                            <span id="statusDetail">Start the Flipper app, then press Connect.</span>
+                        </div>
+                    </div>
+
+                    <dl class="device-meta">
+                        <div>
+                            <dt>Device</dt>
+                            <dd id="deviceName">No device selected</dd>
+                        </div>
+                        <div>
+                            <dt>Output</dt>
+                            <dd>USB HID · check the Flipper screen</dd>
+                        </div>
+                    </dl>
+
+                    <div class="button-row">
+                        <button id="connectBtn" class="btn btn--primary" type="button">
+                            Connect Flipper
+                        </button>
+                        <button id="chooseBtn" class="btn" type="button" hidden>
+                            Choose another
+                        </button>
+                        <button id="disconnectBtn" class="btn" type="button" disabled>
+                            Disconnect
+                        </button>
+                        <button id="releaseBtn" class="btn btn--danger" type="button" disabled>
+                            Release all
+                        </button>
+                    </div>
+
+                    <p class="microcopy">
+                        First connection pairs with a PIN shown on the Flipper. The serial profile is
+                        authenticated, so keystrokes cannot be injected without that bond.
+                    </p>
+                </section>
+
+                <section class="card flow-card" aria-label="Data path">
+                    <div class="card-kicker">Data path</div>
+                    <div class="flow">
+                        <div class="flow-node">
+                            <span class="flow-icon">◫</span>
+                            <strong>Chrome</strong>
+                            <small>keyboard capture</small>
+                        </div>
+                        <div class="flow-arrow">
+                            <span>BLE</span>
+                            <i></i>
+                        </div>
+                        <div class="flow-node flow-node--flipper">
+                            <span class="flow-icon">◆</span>
+                            <strong>Flipper</strong>
+                            <small>BLE → HID</small>
+                        </div>
+                        <div class="flow-arrow">
+                            <span>USB</span>
+                            <i></i>
+                        </div>
+                        <div class="flow-node">
+                            <span class="flow-icon">▣</span>
+                            <strong>Host</strong>
+                            <small>types keys</small>
+                        </div>
+                    </div>
+                    <p class="flow-caption">
+                        The browser only sends HID key positions. The target host applies its own
+                        keyboard layout, so <code>KeyA</code> is <code>a</code> on QWERTY and
+                        <code>q</code> on AZERTY.
+                    </p>
+                </section>
+            </div>
+
+            <section class="card capture-card" aria-labelledby="capture-title">
+                <div class="card-heading">
+                    <div>
+                        <div class="card-kicker">Live input</div>
+                        <h2 id="capture-title" class="card-title">Keyboard capture</h2>
+                    </div>
+                    <span id="modeHint" class="hint"></span>
+                </div>
+
+                <div
+                    id="capturePad"
+                    class="capture-pad"
+                    tabindex="0"
+                    role="textbox"
+                    aria-label="Keyboard capture area"
+                    aria-describedby="padHint"
+                >
+                    <span class="pad-icon" aria-hidden="true">⌨</span>
+                    <strong id="padHint">Connect the Flipper to start</strong>
+                    <span class="pad-sub">
+                        Click this area, then type. Clicking outside pauses capture and releases
+                        keys.
+                    </span>
+                </div>
+
+                <div class="stats">
+                    <div class="stat">
+                        <span>States sent</span>
+                        <strong id="packets">0</strong>
+                    </div>
+                    <div class="stat">
+                        <span>Key events</span>
+                        <strong id="keyCount">0</strong>
+                    </div>
+                    <div class="stat">
+                        <span>BLE credit</span>
+                        <strong id="bufferValue">486 B</strong>
+                    </div>
+                    <div class="stat stat--wide">
+                        <span>Pressed</span>
+                        <strong id="pressedKeys">—</strong>
+                    </div>
+                </div>
+            </section>
+
+            <div class="bottom-grid">
+                <section class="card">
+                    <div class="card-kicker">Setup</div>
+                    <h2 class="card-title">Four steps</h2>
+                    <ol class="steps">
+                        <li>
+                            <span class="step-no">1</span>
+                            <div>
+                                <strong>Prepare the Flipper</strong>
+                                <p>
+                                    Turn Bluetooth on, copy the FAP to the SD card, and launch
+                                    <em>BLE Keyboard Bridge</em>. The screen shows BLE and USB
+                                    status.
+                                </p>
+                            </div>
+                        </li>
+                        <li>
+                            <span class="step-no">2</span>
+                            <div>
+                                <strong>Plug into the target</strong>
+                                <p>
+                                    Connect the Flipper to the host with USB. Wait until the
+                                    Flipper screen says <code>USB READY</code>.
+                                </p>
+                            </div>
+                        </li>
+                        <li>
+                            <span class="step-no">3</span>
+                            <div>
+                                <strong>Pair from Chrome</strong>
+                                <p>
+                                    Press <em>Connect Flipper</em>, pick the entry starting with
+                                    “Flipper”, then confirm the PIN shown on the Flipper in the OS
+                                    pairing dialog.
+                                </p>
+                            </div>
+                        </li>
+                        <li>
+                            <span class="step-no">4</span>
+                            <div>
+                                <strong>Type</strong>
+                                <p>
+                                    Click the capture pad and type. Modifier and navigation keys
+                                    are forwarded too.
+                                </p>
+                            </div>
+                        </li>
+                    </ol>
+                    <p class="warning-inline">
+                        Use Chrome on a <strong>different device</strong> from the USB host.
+                        If both are the same computer, the injected keystrokes land back in
+                        this page and can form a feedback loop.
+                    </p>
+                </section>
+
+                <section class="card">
+                    <div class="card-kicker">Troubleshooting</div>
+                    <h2 class="card-title">If it does not work</h2>
+
+                    <details open>
+                        <summary>The Flipper does not appear</summary>
+                        <p>
+                            Enable Bluetooth, make sure no other app is using the serial profile,
+                            and check that the FAP is running. If you renamed the Flipper, use
+                            “Show all BLE devices” at the bottom.
+                        </p>
+                    </details>
+                    <details>
+                        <summary>Pairing or PIN fails</summary>
+                        <p>
+                            Remove the old Flipper pairing, relaunch the app, and try again. If
+                            Chrome never shows a PIN dialog, pair the Flipper once from the OS
+                            Bluetooth settings while the app is running, then press Reconnect.
+                        </p>
+                    </details>
+                    <details>
+                        <summary>Connected, but nothing types</summary>
+                        <p>
+                            Check the Flipper screen: USB must show <code>READY</code>. Close
+                            qFlipper if USB switching is stuck. The capture pad must have focus,
+                            and <a href="https://developer.chrome.com/docs/capabilities/bluetooth">Web Bluetooth</a>
+                            must be available.
+                        </p>
+                    </details>
+                    <details>
+                        <summary>Wrong characters</summary>
+                        <p>
+                            This app sends physical HID positions. Change the target host's
+                            keyboard layout to match the keyboard you are typing on, or expect
+                            QWERTY-position output.
+                        </p>
+                    </details>
+                    <details>
+                        <summary>Keys stuck down</summary>
+                        <p>
+                            Press <em>Release all</em>, click outside the capture pad, or
+                            disconnect. The Flipper also releases everything after five seconds
+                            without a state heartbeat.
+                        </p>
+                    </details>
+                </section>
+            </div>
+
+            <section class="card log-card">
+                <div class="card-heading">
+                    <div>
+                        <div class="card-kicker">Diagnostics</div>
+                        <h2 class="card-title">Activity</h2>
+                    </div>
+                    <button id="clearLogBtn" class="link-btn" type="button">Clear</button>
+                </div>
+                <div id="log" class="log" aria-live="polite"></div>
+            </section>
+
+            <footer class="footer">
+                <span>BLE serial → USB HID · Flipper Zero FAP + vanilla Web Bluetooth</span>
+                <button id="allDevicesBtn" class="link-btn" type="button">
+                    Flipper not listed? Show all BLE devices
+                </button>
+            </footer>
+        </main>
+
+        <noscript>
+            <div class="noscript">This page needs JavaScript and Web Bluetooth to run.</div>
+        </noscript>
+    </body>
+</html>

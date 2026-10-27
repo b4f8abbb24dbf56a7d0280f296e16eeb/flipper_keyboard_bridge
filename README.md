@@ -1,0 +1,242 @@
+# BLE Keyboard Bridge
+
+**Live web app:** <https://b4f8abbb24dbf56a7d0280f296e16eeb.github.io/flipper_keyboard_bridge/>
+
+A tiny two-part bridge:
+
+```
+Chrome (Web Bluetooth, keyboard capture)
+        │  BLE serial, 9-byte HID state packets
+        ▼
+Flipper Zero FAP
+        │  USB HID keyboard
+        ▼
+Target host
+```
+
+The Flipper stays plugged into the target host as a USB keyboard. A second
+device (phone, tablet, or another computer) runs Chrome, connects to the
+Flipper over BLE, and forwards physical key presses. The Flipper types them
+into the target host.
+
+This is useful for using a phone/tablet as a wireless keyboard, or for typing
+from one computer into another without switching input devices.
+
+## What is in this repo
+
+| Path | Purpose |
+| --- | --- |
+| `main.c` | Flipper FAP: BLE serial receive, key-state diffing, USB HID output |
+| `application.fam` | FAP manifest |
+| `dist/ble_kb_bridge.fap` | Prebuilt FAP (official firmware SDK 1.5.1, API 88.2) |
+| `web/index.html` | Web Bluetooth UI |
+| `web/app.js` | Connection, flow control, keyboard capture |
+| `web/hid.js` | `KeyboardEvent.code` → USB HID usage mapping |
+| `web/hid.test.mjs` | Mapping/protocol unit tests |
+| `.github/workflows/pages.yml` | Publishes `web/` to GitHub Pages |
+
+## Requirements
+
+- Flipper Zero with **official firmware 1.5.x** (built against 1.5.1 / API 88.2).
+  Recent 1.4.x/Unleashed/Momentum builds may work, but the FAP is only built
+  against the official 1.5.1 SDK here.
+- Chrome or Edge with Web Bluetooth. On desktop/laptop, Chrome. On mobile,
+  Chrome on Android. Safari/Firefox do not support Web Bluetooth.
+- USB cable from the Flipper to the **target** host.
+- Chrome must run on a **different device** from the target host. See
+  [Same-host feedback loop](#same-host-feedback-loop).
+
+The target host does not need any software. It sees a standard USB keyboard.
+
+## Build the FAP
+
+The build uses [ufbt](https://github.com/flipperdevices/flipperzero-ufbt).
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install ufbt
+.venv/bin/ufbt update
+.venv/bin/ufbt
+```
+
+The FAP is written to `dist/ble_kb_bridge.fap`. To launch it directly with the
+Flipper connected over USB:
+
+```bash
+.venv/bin/ufbt launch
+```
+
+> When the app starts it switches the Flipper's USB mode from CDC to HID, so
+> the qFlipper/`ufbt` serial connection will disappear. That is expected.
+
+You can also copy `dist/ble_kb_bridge.fap` to the Flipper SD card under
+`/ext/apps/Tools/` and launch it from **Apps → Tools → BLE Keyboard Bridge**.
+
+## Publish the web app to GitHub Pages
+
+The web app is fully static and is served from `web/`. No backend, local
+server, or build step is needed. Web Bluetooth requires HTTPS; GitHub Pages
+provides it.
+
+1. Push this repository to GitHub.
+2. In **Settings → Pages → Build and deployment**, set **Source** to
+   **GitHub Actions**.
+3. Push to `main` (or run the **Deploy web app to GitHub Pages** workflow
+   manually).
+4. Open <https://b4f8abbb24dbf56a7d0280f296e16eeb.github.io/flipper_keyboard_bridge/>
+   in Chrome.
+
+The included workflow uploads only `web/`, so the page is at the Pages root.
+All asset imports are relative, so it works under the repository subpath.
+
+For **Chrome on Android**, open the same GitHub Pages URL on the phone. Do not
+use a plain `http://<LAN-IP>` URL; Android Chrome will not expose Web Bluetooth
+outside a secure context.
+
+## Use
+
+1. On the Flipper: turn **Bluetooth on** in Settings, then launch
+   **BLE Keyboard Bridge**.
+2. Plug the Flipper into the **target host** via USB. The Flipper screen should
+   show `USB READY`. On macOS, accept the keyboard setup dialog if it appears.
+3. On the Chrome device, open the web app and press **Connect Flipper**.
+4. Choose the device whose name starts with `Flipper` (the advertised name is
+   usually `Flipper <name>`).
+5. Confirm the pairing PIN shown on the Flipper in the OS pairing dialog.
+6. Click the big capture pad on the web page, then type.
+7. Click outside the pad, press **Release all**, or press **Disconnect** to stop.
+
+The Flipper screen shows BLE/USB state and a count of forwarded keys.
+
+### Pairing notes
+
+The Flipper serial profile uses authenticated writes and PIN pairing. The first
+connection must be bonded. Web Bluetooth does not expose a pairing API; Chrome
+delegates the PIN dialog to the OS.
+
+If the PIN prompt never appears:
+
+- Remove any old pairing for that Flipper.
+- Relaunch the FAP.
+- Pair the Flipper once from the OS Bluetooth settings while the app is
+  running, then press **Reconnect** in the web app.
+- On Linux, check that your BlueZ pairing agent is running. On Windows, remove
+  the old device in Bluetooth settings and retry.
+
+## Same-host feedback loop
+
+The browser captures keys from the device it runs on. The Flipper injects keys
+into the USB host. If Chrome and the USB host are the **same computer**, the
+injected HID events can land back in the web page and be captured again.
+
+Use a second device for Chrome, or use a dedicated target machine. This is not
+a limitation of the BLE link; it is how a keyboard bridge works.
+
+## Keyboard semantics
+
+The web app maps `KeyboardEvent.code` (physical key position) to USB HID usage
+IDs. The **target host's** keyboard layout determines the resulting character:
+
+- On a QWERTY host, the physical `A` key produces `a`.
+- On an AZERTY host, the same physical position produces `q`.
+
+That is the same behavior as plugging a QWERTY keyboard into an AZERTY machine.
+Modifiers, arrows, function keys, navigation keys, numpad, and common editing
+keys are mapped. Standalone media/consumer keys are not forwarded in this
+version. Some OS/browser shortcuts (for example `Cmd+Tab`, `Ctrl+W`) cannot be
+intercepted by a web page and are handled locally.
+
+Caps Lock and Num Lock are forwarded as key presses; their LED state belongs to
+the target host.
+
+## Protocol
+
+The browser sends one full keyboard state per GATT write:
+
+```
+byte 0     0xA5 magic
+byte 1     HID modifier bits (bit 0 = left Ctrl, bit 7 = right GUI)
+bytes 2-7  up to six HID keyboard usage IDs, zero-padded
+byte 8     XOR of bytes 0..7
+```
+
+The Flipper diffs the new state against its current state and emits only the
+necessary `furi_hal_hid_kb_press` / `furi_hal_hid_kb_release` calls. This makes
+lost/duplicated key-up packets self-heal on the next state packet.
+
+The BLE serial service uses Flipper's proprietary service/characteristics:
+
+| Item | UUID |
+| --- | --- |
+| Service | `8fe5b3d5-2e7f-4a98-2a48-7acc60fe0000` |
+| Browser → Flipper RX | `19ed82ae-ed21-4c9d-4145-228e62fe0000` |
+| Flow control | `19ed82ae-ed21-4c9d-4145-228e63fe0000` |
+
+The serial flow-control window is 486 bytes. A 9-byte packet was chosen so the
+window is exactly 54 packets; the web client tracks the flow-control
+characteristic and waits for a reset when credit runs out.
+
+The FAP re-registers its serial callback after every connection because the
+firmware BT service installs its RPC callback on connect. It also disables RPC
+mode so writes reach the app. This behavior is documented in the source and is
+required with current firmware.
+
+## FAP behavior
+
+- Advertises the normal Flipper BLE serial profile. The device name comes from
+  the Flipper settings, not the app name.
+- Configures the USB interface as HID with product name
+  `BLE Keyboard Bridge` (VID/PID `046D:C529`).
+- Releases all keys on BLE disconnect, USB disconnect, app exit, or after five
+  seconds without a state heartbeat while keys are held.
+- Press **Back** to exit. Press **OK** to release all keys; if Bluetooth was off
+  at launch, OK also retries starting the BLE profile.
+
+## Testing done
+
+- FAP compiles cleanly with ufbt against official SDK 1.5.1 / API 88.2.
+- Web unit tests: `cd web && node --test hid.test.mjs` (8 tests, all passing).
+- JavaScript syntax checks for `web/app.js` and `web/hid.js`.
+- End-to-end BLE + USB HID testing on physical hardware is still pending in
+  this workspace; the local Flipper CDC port was busy at the time of
+  packaging. The code follows the current firmware serial-profile API and the
+  flow-control quirks used by working BLE→USB-HID FAPs.
+
+## Troubleshooting
+
+**The Flipper is not in the chooser**
+: Use **Show all BLE devices** in the footer. Make sure Bluetooth is on, the FAP
+  is running, and no other BLE client is connected. The advertised name is
+  normally `Flipper <name>`.
+
+**Connected but no typing**
+: Check the Flipper screen for `USB READY`. Close qFlipper if USB mode switching
+  is stuck. Click the capture pad so it has focus. Confirm the target host sees
+  a new USB keyboard.
+
+**Wrong characters**
+: The target host's layout is being applied to physical key positions. Switch
+  the host layout or expect QWERTY-position output.
+
+**Stuck keys**
+: Press **Release all** or click outside the capture pad. The FAP also releases
+  everything after five seconds without a heartbeat while keys are down.
+
+**BLE connects but writes fail**
+: Pairing/bonding was not completed. Remove the old pairing, relaunch the app,
+  and confirm the PIN. The serial RX characteristic requires an authenticated
+  link.
+
+## Security
+
+This is a remote keyboard injection tool. Anyone who can bond to the Flipper's
+serial profile can type on the USB host. Only run it with devices you trust, and
+remove the Flipper pairing when you are done. The web page itself does not send
+data anywhere.
+
+## Prior art / references
+
+- [Chrome Web Bluetooth documentation](https://developer.chrome.com/docs/capabilities/bluetooth)
+- Flipper firmware BLE serial profile/services (`ble_profile_serial`)
+- The BLE serial callback/RPC workaround is the same behavior used by
+  community BLE→USB-HID apps such as DuckerTheFlipper/TransTheFlip.

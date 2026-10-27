@@ -128,7 +128,7 @@ function setStatus(kind, text, detail = "") {
 }
 
 function isCaptureReady() {
-    return state.connected && state.fapVerified && !state.typing;
+    return state.connected && state.fapVerified && state.usbReady && !state.typing;
 }
 
 function setCaptureVisual() {
@@ -143,6 +143,8 @@ function setCaptureVisual() {
         els.padHint.textContent = "Verifying the Flipper app…";
     } else if(!state.fapVerified) {
         els.padHint.textContent = "Bridge not verified";
+    } else if(!state.usbReady) {
+        els.padHint.textContent = "Plug the Flipper into the host";
     } else if(state.typing) {
         els.padHint.textContent = "Typing pasted text…";
     } else if(focused) {
@@ -187,7 +189,11 @@ function updateButtons() {
     els.releaseBtn.disabled = !state.connected || state.typing;
     els.allDevicesBtn.disabled = !state.supported;
     els.typeTextBtn.disabled =
-        !state.connected || !state.fapVerified || state.typing || state.connecting;
+        !state.connected ||
+        !state.fapVerified ||
+        !state.usbReady ||
+        state.typing ||
+        state.connecting;
     els.stopTypingBtn.disabled = !state.typing;
     els.countdownToggle.disabled = state.typing;
     els.pasteBox.disabled = state.typing;
@@ -456,7 +462,16 @@ function stopTyping() {
 }
 
 async function typePastedText() {
-    if(!state.connected || !state.fapVerified || state.typing) return;
+    if(!state.connected || !state.fapVerified || !state.usbReady || state.typing) {
+        if(state.connected && state.fapVerified && !state.usbReady) {
+            setStatus(
+                "error",
+                "USB not connected",
+                "Plug the Flipper into the target host and wait for USB READY.",
+            );
+        }
+        return;
+    }
 
     const text = els.pasteBox.value
         .replace(/\r\n/g, "\n")
@@ -586,8 +601,8 @@ function updateUsbFromLine(line) {
     const ready = match[1] === "1";
     if(ready !== state.usbReady) {
         state.usbReady = ready;
-        updateStats();
         updateBridgeDetail();
+        updateUI();
     }
 }
 
@@ -675,6 +690,17 @@ async function pingOnce() {
             text = await withGatt(readTxText);
         } catch(error) {
             log(`Status read failed: ${error.message}`, "warn");
+            if(state.txNotifying) {
+                for(let i = 0; i < 10 && state.connected; i++) {
+                    if(state.lastPongSeq === sequence) {
+                        state.lastPongAt = Date.now();
+                        updateBridgeDetail();
+                        updateUI();
+                        return true;
+                    }
+                    await sleep(50);
+                }
+            }
             return false;
         }
 

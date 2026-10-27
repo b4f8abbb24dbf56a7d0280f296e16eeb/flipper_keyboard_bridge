@@ -44,8 +44,9 @@ from one computer into another without switching input devices.
 - Chrome or Edge with Web Bluetooth. On desktop/laptop, Chrome. On mobile,
   Chrome on Android. Safari/Firefox do not support Web Bluetooth.
 - USB cable from the Flipper to the **target** host.
-- For **live keyboard** capture, Chrome must run on a **different device** from
-  the target host. **Paste & type** can be used on the same computer. See
+- Chrome should run on a **different device** from the target host. Paste mode
+  now starts typing immediately, so running Chrome on the host would send keys
+  back into the page. See
   [Paste mode vs live mode](#paste-mode-vs-live-mode).
 
 The target host does not need any software. It sees a standard USB keyboard.
@@ -108,8 +109,8 @@ outside a secure context.
 6. Wait for **Verified BLE Keyboard Bridge** in the web app. This is the HKB1
    handshake, not just a successful BLE connection.
 7. Use either mode:
-   - **Paste & type:** paste text, press **Type text**, and switch to the target
-     window during the 3-second head start.
+   - **Paste & type:** paste text and press **Type text**. Typing starts
+     immediately.
    - **Live keyboard:** click the capture pad and type.
 8. Press **Release all**, **Stop**, or **Disconnect** when done.
 
@@ -132,23 +133,21 @@ If the PIN prompt never appears:
 
 ## Paste mode vs live mode
 
-**Paste & type** is the safe mode for using Chrome on the same computer as the
-USB host:
+**Paste & type** sends acknowledged HID key states with a short hold/release
+gap, so the host sees real keystrokes. It starts immediately when you press
+**Type text**:
 
 1. Paste or type text into the box.
-2. Keep **3s head start** checked.
-3. Press **Type text**.
-4. Switch to the target app/window during the countdown.
+2. Press **Type text**.
+3. Keep the page visible while it types.
 
-The page sends acknowledged HID key states with a deliberate hold/release gap,
-so the host sees real keystrokes. Only printable ASCII, newline, and tab are
-supported. Emoji, smart quotes, IME text, and other non-ASCII characters are
-rejected. The target host layout still applies.
+Only printable ASCII, newline, and tab are supported. Emoji, smart quotes, IME
+text, and other non-ASCII characters are rejected. The target host layout still
+applies.
 
-**Live keyboard** streams physical key positions as they happen. It requires
-Chrome to stay focused, so if Chrome and the USB host are the same computer,
-injected keys can land back in the page and be captured again. Use a second
-device for live capture, or use paste mode.
+**Live keyboard** streams physical key positions as they happen. Both modes
+expect Chrome to be on a different device from the USB host; if Chrome is on the
+host, the injected keys can land back in the page.
 
 ## Keyboard semantics
 
@@ -203,9 +202,9 @@ HKB1 PONG <session-hex> <sequence> USB=<0|1>
 ```
 
 The web page sends a PING on connect, requires a matching PONG before enabling
-either input mode, and repeats it every two seconds. This verifies that the
+either input mode, and repeats it every second. This verifies that the
 connected serial profile belongs to the BLE Keyboard Bridge FAP, not another
-Flipper app. Missing replies for seven seconds disable input and show a
+Flipper app. Missing replies for four seconds disable input and show a
 “bridge not responding” state.
 
 The BLE serial service uses Flipper's proprietary service/characteristics:
@@ -236,9 +235,10 @@ required with current firmware.
   seconds without a state heartbeat while keys are held.
 - Answers HKB1 PING packets and reports USB readiness on the serial TX
   characteristic.
-- Only calls the BLE link “active” after a recent HKB1 ping. The screen shows
-  `WAITING`, `INVALID`, or `CONNECTED`; a connection from the Flipper mobile
-  app, OS Bluetooth, or another client shows `INVALID` and cannot inject keys.
+- Only calls the BLE link “active” after a recent HKB1 ping (five-second
+  window). The screen shows `WAITING`, `INVALID`, or `CONNECTED`; a connection
+  from the Flipper mobile app, OS Bluetooth, or another client shows `INVALID`
+  and cannot inject keys.
 - Press **Back** to exit. Press **OK** to release all keys; if Bluetooth was off
   at launch, OK also retries starting the BLE profile.
 

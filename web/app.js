@@ -17,12 +17,12 @@ const FLOW_UUID = "19ed82ae-ed21-4c9d-4145-228e63fe0000";
 const FLOW_WAIT_MS = 1200;
 const FLOW_POLL_MS = 400;
 const HEARTBEAT_MS = 1000;
-const PING_INTERVAL_MS = 2000;
-const PONG_TIMEOUT_MS = 7000;
+const PING_INTERVAL_MS = 1000;
+const PONG_TIMEOUT_MS = 4000;
 const MAX_LOG_ENTRIES = 80;
 const MAX_PASTE_CHARS = 5000;
-const TYPE_PRESS_MS = 40;
-const TYPE_RELEASE_MS = 15;
+const TYPE_PRESS_MS = 20;
+const TYPE_RELEASE_MS = 8;
 const BRIDGE_PREFIX = "HKB1";
 
 const $ = (id) => document.getElementById(id);
@@ -49,7 +49,6 @@ const els = {
     typeTextBtn: $("typeTextBtn"),
     stopTypingBtn: $("stopTypingBtn"),
     typeProgress: $("typeProgress"),
-    countdownToggle: $("countdownToggle"),
     log: $("log"),
     clearLogBtn: $("clearLogBtn"),
     supportWarning: $("supportWarning"),
@@ -195,7 +194,6 @@ function updateButtons() {
         state.typing ||
         state.connecting;
     els.stopTypingBtn.disabled = !state.typing;
-    els.countdownToggle.disabled = state.typing;
     els.pasteBox.disabled = state.typing;
 
     els.connectBtn.textContent = state.connecting
@@ -525,16 +523,6 @@ async function typePastedText() {
     try {
         await sendExactState(0, [], true);
         if(state.typingCancel || state.typingRun !== run) throw new Error("Cancelled");
-
-        if(els.countdownToggle.checked) {
-            for(let remaining = 3; remaining > 0; remaining--) {
-                if(state.typingCancel || !state.connected || state.typingRun !== run) {
-                    throw new Error("Cancelled");
-                }
-                els.typeProgress.textContent = `Starting in ${remaining}…`;
-                await sleep(1000);
-            }
-        }
 
         for(let i = 0; i < actions.length; i++) {
             if(state.typingCancel || !state.connected || state.typingRun !== run) {

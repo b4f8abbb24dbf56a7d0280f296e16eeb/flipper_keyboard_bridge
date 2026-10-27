@@ -341,24 +341,6 @@ summary:focus-visible {
     opacity: 0.55;
 }
 
-.check {
-    display: inline-flex;
-    align-items: center;
-    gap: 7px;
-    margin-left: 4px;
-    color: var(--muted);
-    cursor: pointer;
-    font-size: 12px;
-    user-select: none;
-}
-
-.check input {
-    width: 15px;
-    height: 15px;
-    margin: 0;
-    accent-color: var(--accent);
-}
-
 .count {
     margin-left: auto;
     color: var(--faint);

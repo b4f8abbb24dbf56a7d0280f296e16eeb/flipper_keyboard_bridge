@@ -38,7 +38,7 @@
 #define CONTROL_VERSION  1
 #define CONTROL_PING     1
 
-#define WEB_PING_TIMEOUT_MS 10000
+#define WEB_PING_TIMEOUT_MS 5000
 #define WATCHDOG_MS          5000
 #define USB_RETRY_MS         1000
 #define USB_POLL_MS          250

@@ -38,6 +38,9 @@
 #define CONTROL_VERSION  1
 #define CONTROL_PING     1
 
+#define TYPING_LOG_CAPACITY 64
+#define TYPING_LOG_TAIL     13
+
 #define WEB_PING_TIMEOUT_MS 5000
 #define WATCHDOG_MS          5000
 #define USB_RETRY_MS         1000
@@ -73,6 +76,9 @@ typedef struct {
 
     uint8_t mods;
     uint8_t keys[MAX_KEYS];
+
+    char typing_log[TYPING_LOG_CAPACITY];
+    size_t typing_log_len;
 
     uint32_t packets;
     uint32_t keys_sent;
@@ -111,6 +117,68 @@ static void hid_release_all(App* app) {
 static bool web_client_active(App* app) {
     return app->last_web_ping_tick != 0 &&
            (furi_get_tick() - app->last_web_ping_tick <= WEB_PING_TIMEOUT_MS);
+}
+
+static void typing_log_append(App* app, char character) {
+    if(character == '\0') return;
+
+    if(app->typing_log_len >= TYPING_LOG_CAPACITY - 1) {
+        memmove(app->typing_log, app->typing_log + 1, TYPING_LOG_CAPACITY - 2);
+        app->typing_log_len = TYPING_LOG_CAPACITY - 2;
+    }
+
+    app->typing_log[app->typing_log_len++] = character;
+    app->typing_log[app->typing_log_len] = '\0';
+}
+
+static void typing_log_backspace(App* app) {
+    if(app->typing_log_len == 0) return;
+    app->typing_log[--app->typing_log_len] = '\0';
+}
+
+static char hid_key_to_char(uint8_t usage, bool shift) {
+    if(usage >= HID_KEYBOARD_A && usage <= HID_KEYBOARD_Z) {
+        char character = (char)('a' + (usage - HID_KEYBOARD_A));
+        return shift ? (char)(character - 'a' + 'A') : character;
+    }
+
+    static const char digits[] = "1234567890";
+    static const char shifted_digits[] = "!@#$%^&*()";
+    if(usage >= HID_KEYBOARD_1 && usage <= HID_KEYBOARD_0) {
+        size_t index = usage - HID_KEYBOARD_1;
+        return shift ? shifted_digits[index] : digits[index];
+    }
+
+    switch(usage) {
+    case HID_KEYBOARD_RETURN:
+    case HID_KEYBOARD_TAB:
+    case HID_KEYBOARD_SPACEBAR:
+        return ' ';
+    case HID_KEYBOARD_MINUS:
+        return shift ? '_' : '-';
+    case HID_KEYBOARD_EQUAL_SIGN:
+        return shift ? '+' : '=';
+    case HID_KEYBOARD_OPEN_BRACKET:
+        return shift ? '{' : '[';
+    case HID_KEYBOARD_CLOSE_BRACKET:
+        return shift ? '}' : ']';
+    case HID_KEYBOARD_BACKSLASH:
+        return shift ? '|' : '\\';
+    case HID_KEYBOARD_SEMICOLON:
+        return shift ? ':' : ';';
+    case HID_KEYBOARD_APOSTROPHE:
+        return shift ? '"' : '\'';
+    case HID_KEYBOARD_GRAVE_ACCENT:
+        return shift ? '~' : '`';
+    case HID_KEYBOARD_COMMA:
+        return shift ? '<' : ',';
+    case HID_KEYBOARD_DOT:
+        return shift ? '>' : '.';
+    case HID_KEYBOARD_SLASH:
+        return shift ? '?' : '/';
+    default:
+        return '\0';
+    }
 }
 
 static bool checksum_valid(const uint8_t* packet) {
@@ -211,6 +279,8 @@ static void hid_apply_packet(App* app, const uint8_t* packet) {
 
     uint8_t added_mods = new_mods & ~app->mods;
     uint8_t removed_mods = app->mods & ~new_mods;
+    bool shift = (new_mods & 0x22) != 0;
+    bool shortcut = (new_mods & 0xdd) != 0;
 
     // Put modifiers down before the keys they modify.
     if(added_mods) {
@@ -228,6 +298,14 @@ static void hid_apply_packet(App* app, const uint8_t* packet) {
         if(!was_down) {
             furi_hal_hid_kb_press(new_keys[i]);
             app->keys_sent++;
+
+            if(!shortcut) {
+                if(new_keys[i] == HID_KEYBOARD_DELETE) {
+                    typing_log_backspace(app);
+                } else {
+                    typing_log_append(app, hid_key_to_char(new_keys[i], shift));
+                }
+            }
         }
     }
 
@@ -436,21 +514,30 @@ static void app_draw_callback(Canvas* canvas, void* context) {
         if(app->keys[i]) typing = true;
     }
 
-    const char* hint;
-    if(!app->profile) {
-        hint = "Enable BT, then OK";
-    } else if(!app->ble_connected) {
-        hint = "Pair from Chrome";
-    } else if(!app->web_active) {
-        hint = "Open web app";
-    } else if(!app->usb_ready) {
-        hint = "Plug USB into host";
-    } else if(typing) {
-        hint = "Typing...";
+    if(app->web_active && app->typing_log_len > 0) {
+        size_t start = app->typing_log_len > TYPING_LOG_TAIL ?
+                           app->typing_log_len - TYPING_LOG_TAIL :
+                           0;
+        char line[8 + TYPING_LOG_TAIL + 2];
+        snprintf(line, sizeof(line), "Typing: %s", app->typing_log + start);
+        canvas_draw_str(canvas, 2, 58, line);
     } else {
-        hint = "Use web app";
+        const char* hint;
+        if(!app->profile) {
+            hint = "Enable BT, then OK";
+        } else if(!app->ble_connected) {
+            hint = "Pair from Chrome";
+        } else if(!app->web_active) {
+            hint = "Open web app";
+        } else if(!app->usb_ready) {
+            hint = "Plug USB into host";
+        } else if(typing) {
+            hint = "Typing...";
+        } else {
+            hint = "Use web app";
+        }
+        canvas_draw_str(canvas, 2, 58, hint);
     }
-    canvas_draw_str(canvas, 2, 58, hint);
 }
 
 static void app_input_callback(InputEvent* input_event, void* context) {

@@ -239,6 +239,9 @@ required with current firmware.
   window). The screen shows `WAITING`, `INVALID`, or `CONNECTED`; a connection
   from the Flipper mobile app, OS Bluetooth, or another client shows `INVALID`
   and cannot inject keys.
+- Keeps a 64-character log of typed characters and shows the last 13 on the
+  bottom line as `Typing: …`, scrolling left as new characters arrive. The log
+  lasts until the FAP exits.
 - Press **Back** to exit. Press **OK** to release all keys; if Bluetooth was off
   at launch, OK also retries starting the BLE profile.
 

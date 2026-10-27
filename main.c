@@ -393,10 +393,10 @@ static void app_draw_callback(Canvas* canvas, void* context) {
     } else if(!app->ble_connected) {
         ble_state = "WAITING";
     } else if(app->web_active) {
-        ble_state = "WEB OK";
+        ble_state = "CONNECTED";
         ble_ok = true;
     } else {
-        ble_state = "LINK ONLY";
+        ble_state = "INVALID";
     }
 
     const char* usb_state;

@@ -28,6 +28,7 @@ from one computer into another without switching input devices.
 | --- | --- |
 | `main.c` | Flipper FAP: BLE serial receive, key-state diffing, USB HID output |
 | `application.fam` | FAP manifest |
+| `icon.png` | 10×10 app icon |
 | `dist/ble_kb_bridge.fap` | Prebuilt FAP (official firmware SDK 1.5.1, API 88.2) |
 | `web/index.html` | Web Bluetooth UI |
 | `web/app.js` | Connection, keepalive verification, keyboard capture, paste typing |
@@ -236,8 +237,8 @@ required with current firmware.
 - Answers HKB1 PING packets and reports USB readiness on the serial TX
   characteristic.
 - Only calls the BLE link “active” after a recent HKB1 ping. The screen shows
-  `WAITING`, `LINK ONLY`, or `WEB OK`; a connection from the Flipper mobile app,
-  OS Bluetooth, or another client shows `LINK ONLY` and cannot inject keys.
+  `WAITING`, `INVALID`, or `CONNECTED`; a connection from the Flipper mobile
+  app, OS Bluetooth, or another client shows `INVALID` and cannot inject keys.
 - Press **Back** to exit. Press **OK** to release all keys; if Bluetooth was off
   at launch, OK also retries starting the BLE profile.
 
@@ -270,10 +271,11 @@ required with current firmware.
   can also happen if the Flipper mobile app or qFlipper is holding the BLE
   connection.
 
-**Flipper says `LINK ONLY`**
+**Flipper says `INVALID`**
 : Some BLE central is connected, but it is not the web page (or the page is not
   sending pings). Close the Flipper mobile app/other Bluetooth clients, open the
-  page, and connect there. The Flipper only shows `WEB OK` after the handshake.
+  page, and connect there. The Flipper only shows `CONNECTED` after the
+  handshake.
 
 **Wrong characters**
 : The target host's layout is being applied. Paste mode sends US-layout ASCII

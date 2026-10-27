@@ -107,17 +107,20 @@
                 >
                     <span class="pad-icon" aria-hidden="true">⌨</span>
                     <strong id="padHint">Connect for keyboard + trackpad</strong>
-                    <span class="pad-sub">Mouse: click to lock · Touch: drag to move</span>
+                    <span class="pad-sub">Click pad to lock · Esc releases · type anytime</span>
                 </div>
 
                 <div class="mouse-row">
+                    <button id="lockMouseBtn" class="btn btn--primary" type="button" disabled>
+                        Lock cursor
+                    </button>
                     <button id="leftClickBtn" class="btn" type="button" disabled>
                         Left click
                     </button>
                     <button id="rightClickBtn" class="btn" type="button" disabled>
                         Right click
                     </button>
-                    <span class="hint">Lock the cursor for free movement</span>
+                    <span class="hint">Esc releases the cursor</span>
                 </div>
 
                 <div class="stats">
@@ -128,9 +131,9 @@
                 </div>
 
                 <p class="microcopy">
-                    Click the pad to lock the cursor, then move freely; click to click and press
-                    Esc to release. With touch, drag to move and tap to click. Chrome should be on a
-                    different device from the USB host.
+                    Press <strong>Lock cursor</strong> or click the pad, then move freely. Click to
+                    left-click, use the mouse buttons, and press <strong>Esc</strong> to release.
+                    Chrome should be on a different device from the USB host.
                 </p>
             </section>
 

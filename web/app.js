@@ -49,6 +49,7 @@ const els = {
     usbStatus: $("usbStatus"),
     pad: $("capturePad"),
     padHint: $("padHint"),
+    lockMouseBtn: $("lockMouseBtn"),
     leftClickBtn: $("leftClickBtn"),
     rightClickBtn: $("rightClickBtn"),
     pressedKeys: $("pressedKeys"),
@@ -237,9 +238,16 @@ function updateButtons() {
         state.typing ||
         state.connecting;
     els.stopTypingBtn.disabled = !state.typing;
-    els.leftClickBtn.disabled = !isCaptureReady();
-    els.rightClickBtn.disabled = !isCaptureReady();
+    els.lockMouseBtn.disabled =
+        !isCaptureReady() || state.pointerLocked || state.pointerLockUnsupported;
+    els.leftClickBtn.disabled = !isCaptureReady() || state.pointerLocked;
+    els.rightClickBtn.disabled = !isCaptureReady() || state.pointerLocked;
     els.pasteBox.disabled = state.typing;
+    els.lockMouseBtn.textContent = state.pointerLocked
+        ? "Cursor locked"
+        : state.pointerLockUnsupported
+          ? "Lock unavailable"
+          : "Lock cursor";
 
     els.connectBtn.textContent = state.connecting
         ? "Connecting…"
@@ -704,6 +712,7 @@ function onPointerLockChange() {
         void releaseMouseButtons();
         log("Cursor released.");
     }
+    updateButtons();
     setCaptureVisual();
 }
 
@@ -738,6 +747,24 @@ function onLockedMouseUp(event) {
     void setMouseButton(button, false);
 }
 
+function onPadClick() {
+    if(!isCaptureReady()) return;
+
+    if(state.pointerLocked || state.touchMode || state.pointerLockUnsupported) {
+        els.pad.focus();
+        return;
+    }
+
+    els.pad.focus();
+    requestMouseLock();
+}
+
+function onLockMouseClick() {
+    if(!isCaptureReady() || state.pointerLocked || state.pointerLockUnsupported) return;
+    els.pad.focus();
+    requestMouseLock();
+}
+
 function onLockedWheel(event) {
     if(!state.pointerLocked || !isCaptureReady()) return;
     event.preventDefault();
@@ -753,12 +780,12 @@ function onPadPointerDown(event) {
 
     if(event.pointerType === "mouse") {
         if(state.pointerLocked) return;
-        event.preventDefault();
-        els.pad.focus();
         state.touchMode = false;
+        els.pad.focus();
 
+        // Let the click event request pointer lock; pointerdown is not a
+        // reliable lock gesture on all Chrome/macOS combinations.
         if(!state.pointerLockUnsupported) {
-            requestMouseLock();
             return;
         }
     } else {
@@ -811,7 +838,12 @@ function onPadPointerUp(event) {
     cancelPointerDrag();
     state.pointerWasFocused = false;
 
-    if(tapped && wasFocused && isCaptureReady()) {
+    if(
+        tapped &&
+        wasFocused &&
+        isCaptureReady() &&
+        (state.touchMode || state.pointerLockUnsupported)
+    ) {
         void clickMouseButton(MOUSE_BUTTON_LEFT);
     }
 }
@@ -1510,9 +1542,8 @@ function bindEvents() {
     els.pad.addEventListener("pointercancel", onPadPointerCancel);
     els.pad.addEventListener("contextmenu", onPadContextMenu);
     els.pad.addEventListener("wheel", onPadWheel, { passive: false });
-    els.pad.addEventListener("click", () => {
-        if(isCaptureReady()) els.pad.focus();
-    });
+    els.pad.addEventListener("click", onPadClick);
+    els.lockMouseBtn.addEventListener("click", onLockMouseClick);
 
     document.addEventListener("pointerlockchange", onPointerLockChange);
     document.addEventListener("pointerlockerror", onPointerLockError);

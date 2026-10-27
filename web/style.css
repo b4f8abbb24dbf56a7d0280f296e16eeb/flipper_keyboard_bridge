@@ -367,9 +367,13 @@ summary:focus-visible {
     background:
         radial-gradient(circle at 50% 35%, rgba(255, 130, 0, 0.1), transparent 48%),
         var(--panel-soft);
-    cursor: text;
+    cursor: pointer;
     outline: none;
     text-align: center;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-tap-highlight-color: transparent;
     transition:
         border-color 160ms ease,
         background 160ms ease,
@@ -390,6 +394,34 @@ summary:focus-visible {
 .capture-pad--muted {
     cursor: not-allowed;
     opacity: 0.6;
+}
+
+.capture-pad--dragging {
+    border-color: var(--accent);
+    cursor: grabbing;
+    background:
+        radial-gradient(circle at 50% 35%, rgba(255, 130, 0, 0.2), transparent 52%),
+        var(--panel-soft);
+    box-shadow:
+        0 0 0 4px rgba(255, 130, 0, 0.08),
+        inset 0 0 42px rgba(255, 130, 0, 0.04);
+}
+
+.mouse-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin-top: 10px;
+}
+
+.mouse-row .hint {
+    margin: 0 0 0 auto;
+}
+
+.mouse-row .btn {
+    min-height: 34px;
+    padding: 7px 12px;
 }
 
 .pad-icon {
@@ -646,6 +678,11 @@ details.panel > :not(summary) {
 
     .capture-pad {
         min-height: 150px;
+    }
+
+    .mouse-row .hint {
+        width: 100%;
+        margin-left: 0;
     }
 
     details.panel > :not(summary) {

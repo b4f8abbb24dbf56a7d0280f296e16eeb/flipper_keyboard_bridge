@@ -6,9 +6,14 @@
  */
 
 export const PACKET_MAGIC = 0xa5;
+export const MOUSE_MAGIC = 0x4d;
 export const PACKET_SIZE = 9;
 export const MAX_KEYS = 6;
 export const SERIAL_CAPACITY = 486;
+
+export const MOUSE_BUTTON_LEFT = 0x01;
+export const MOUSE_BUTTON_RIGHT = 0x02;
+export const MOUSE_BUTTON_MIDDLE = 0x04;
 
 export const CONTROL_MAGIC = 0x48;
 export const CONTROL_VERSION = 1;
@@ -229,6 +234,27 @@ export function buildHidStatePacket(mods, usages) {
  */
 export function buildStatePacket(codes) {
     return buildHidStatePacket(modifierMask(codes), keyUsages(codes));
+}
+
+/**
+ * Build a mouse packet:
+ *   M <buttons> <dx> <dy> <wheel> 0 0 0 XOR
+ * dx/dy/wheel are signed bytes. All fields are one GATT write.
+ * @param {number} buttons HID mouse button mask
+ * @param {number} dx relative X movement, -127..127
+ * @param {number} dy relative Y movement, -127..127
+ * @param {number} wheel wheel steps, -127..127
+ * @returns {Uint8Array}
+ */
+export function buildMousePacket(buttons, dx, dy, wheel) {
+    const packet = new Uint8Array(PACKET_SIZE);
+    packet[0] = MOUSE_MAGIC;
+    packet[1] = buttons & 0x07;
+    packet[2] = dx & 0xff;
+    packet[3] = dy & 0xff;
+    packet[4] = wheel & 0xff;
+    packet[PACKET_SIZE - 1] = packetChecksum(packet);
+    return packet;
 }
 
 /**

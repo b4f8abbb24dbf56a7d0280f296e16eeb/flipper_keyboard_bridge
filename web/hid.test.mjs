@@ -4,10 +4,14 @@ import test from "node:test";
 import {
     CONTROL_MAGIC,
     MAX_KEYS,
+    MOUSE_BUTTON_LEFT,
+    MOUSE_BUTTON_RIGHT,
+    MOUSE_MAGIC,
     PACKET_SIZE,
     SERIAL_CAPACITY,
     asciiToHid,
     buildHidStatePacket,
+    buildMousePacket,
     buildPingPacket,
     buildStatePacket,
     isMappedCode,
@@ -116,6 +120,16 @@ test("rejects non-ASCII paste content", () => {
     assert.equal(actions.length, 4);
     assert.deepEqual(actions.map((action) => action.label), ["H", "i", "Space", "Enter"]);
     assert.deepEqual(unsupported, ["👋"]);
+});
+
+test("builds a mouse packet with signed deltas", () => {
+    const packet = buildMousePacket(MOUSE_BUTTON_LEFT | MOUSE_BUTTON_RIGHT, -12, 34, -1);
+    assert.equal(packet[0], MOUSE_MAGIC);
+    assert.equal(packet[1], 0x03);
+    assert.equal(packet[2], 0xf4);
+    assert.equal(packet[3], 34);
+    assert.equal(packet[4], 0xff);
+    assert.equal(packet[8], packetChecksum(packet));
 });
 
 test("builds a proprietary keepalive packet", () => {

@@ -1,7 +1,10 @@
 import {
+    MOUSE_BUTTON_LEFT,
+    MOUSE_BUTTON_RIGHT,
     PACKET_SIZE,
     SERIAL_CAPACITY,
     buildHidStatePacket,
+    buildMousePacket,
     buildPingPacket,
     buildStatePacket,
     isMappedCode,
@@ -25,6 +28,11 @@ const TYPE_PRESS_MS = 20;
 const TYPE_RELEASE_MS = 8;
 const BRIDGE_PREFIX = "HKB1";
 
+const MOUSE_MOVE_INTERVAL_MS = 16;
+const MOUSE_SENSITIVITY = 1;
+const TAP_MAX_MOVE = 6;
+const TAP_MAX_MS = 500;
+
 const $ = (id) => document.getElementById(id);
 
 const els = {
@@ -40,6 +48,8 @@ const els = {
     usbStatus: $("usbStatus"),
     pad: $("capturePad"),
     padHint: $("padHint"),
+    leftClickBtn: $("leftClickBtn"),
+    rightClickBtn: $("rightClickBtn"),
     pressedKeys: $("pressedKeys"),
     packets: $("packets"),
     keyCount: $("keyCount"),
@@ -93,6 +103,20 @@ const state = {
     typingTotal: 0,
     typingIndex: 0,
     typingDone: 0,
+
+    mouseButtons: 0,
+    mouseDx: 0,
+    mouseDy: 0,
+    mouseWheel: 0,
+    mouseFlushTimer: null,
+    mouseFlushing: false,
+
+    pointerId: null,
+    pointerLastX: 0,
+    pointerLastY: 0,
+    pointerMoved: 0,
+    pointerStart: 0,
+    pointerWasFocused: false,
 };
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -127,7 +151,13 @@ function setStatus(kind, text, detail = "") {
 }
 
 function isCaptureReady() {
-    return state.connected && state.fapVerified && state.usbReady && !state.typing;
+    return (
+        state.connected &&
+        state.fapVerified &&
+        state.usbReady &&
+        !state.typing &&
+        !state.connecting
+    );
 }
 
 function setCaptureVisual() {
@@ -137,7 +167,7 @@ function setCaptureVisual() {
     els.pad.classList.toggle("capture-pad--muted", !ready);
 
     if(!state.connected) {
-        els.padHint.textContent = "Connect the Flipper to start";
+        els.padHint.textContent = "Connect for keyboard + trackpad";
     } else if(state.connecting) {
         els.padHint.textContent = "Verifying the Flipper app…";
     } else if(!state.fapVerified) {
@@ -147,9 +177,9 @@ function setCaptureVisual() {
     } else if(state.typing) {
         els.padHint.textContent = "Typing pasted text…";
     } else if(focused) {
-        els.padHint.textContent = "Listening — type now";
+        els.padHint.textContent = "Type · drag to move · tap to click";
     } else {
-        els.padHint.textContent = "Click here to capture the keyboard";
+        els.padHint.textContent = "Click to type · drag to move";
     }
 }
 
@@ -194,6 +224,8 @@ function updateButtons() {
         state.typing ||
         state.connecting;
     els.stopTypingBtn.disabled = !state.typing;
+    els.leftClickBtn.disabled = !isCaptureReady();
+    els.rightClickBtn.disabled = !isCaptureReady();
     els.pasteBox.disabled = state.typing;
 
     els.connectBtn.textContent = state.connecting
@@ -234,6 +266,20 @@ function resetConnectionState() {
     state.typing = false;
     state.typingCancel = true;
     if(els.typeProgress) els.typeProgress.textContent = "Ready";
+
+    if(state.mouseFlushTimer) {
+        clearTimeout(state.mouseFlushTimer);
+        state.mouseFlushTimer = null;
+    }
+    state.mouseButtons = 0;
+    state.mouseDx = 0;
+    state.mouseDy = 0;
+    state.mouseWheel = 0;
+    state.mouseFlushing = false;
+    state.pointerId = null;
+    state.pointerMoved = 0;
+    els.pad.classList.remove("capture-pad--dragging");
+
     resolveFlowWaiters();
 }
 
@@ -427,6 +473,9 @@ function sendState() {
 }
 
 function releaseAll(reason = "Keys released") {
+    cancelPointerDrag();
+    void releaseMouseButtons();
+
     if(state.typing) {
         stopTyping();
         return;
@@ -449,6 +498,237 @@ async function sendExactState(mods, usages, forceResponse = false) {
         state.credit = Math.max(0, state.credit - packet.length);
         state.packets++;
         updateStats();
+    });
+}
+
+async function sendMousePacket(buttons, dx, dy, wheel, forceResponse = false) {
+    if(!state.connected || !state.fapVerified) throw new Error("Disconnected");
+
+    await withGatt(async () => {
+        if(!state.connected || !state.fapVerified) throw new Error("Disconnected");
+        await waitForCredit(PACKET_SIZE);
+        if(!state.connected) throw new Error("Disconnected");
+
+        const packet = buildMousePacket(buttons, dx, dy, wheel);
+        await writePacket(packet, forceResponse);
+        state.credit = Math.max(0, state.credit - packet.length);
+        state.packets++;
+        updateStats();
+    });
+}
+
+function scheduleMouseFlush(delay = MOUSE_MOVE_INTERVAL_MS) {
+    if(state.mouseFlushTimer || state.mouseFlushing) return;
+    state.mouseFlushTimer = setTimeout(() => {
+        state.mouseFlushTimer = null;
+        void flushMouseMove();
+    }, delay);
+}
+
+async function flushMouseMove() {
+    if(state.mouseFlushing || !isCaptureReady()) return;
+    state.mouseFlushing = true;
+    let sendFailed = false;
+
+    try {
+        let dx = Math.trunc(state.mouseDx);
+        let dy = Math.trunc(state.mouseDy);
+        let wheel = Math.trunc(state.mouseWheel);
+        state.mouseDx -= dx;
+        state.mouseDy -= dy;
+        state.mouseWheel -= wheel;
+
+        const sendX = Math.max(-127, Math.min(127, dx));
+        const sendY = Math.max(-127, Math.min(127, dy));
+        const sendWheel = Math.max(-127, Math.min(127, wheel));
+        state.mouseDx += dx - sendX;
+        state.mouseDy += dy - sendY;
+        state.mouseWheel += wheel - sendWheel;
+
+        if(sendX || sendY || sendWheel) {
+            await sendMousePacket(state.mouseButtons, sendX, sendY, sendWheel);
+        }
+    } catch(error) {
+        sendFailed = true;
+        log(`Mouse send failed: ${error.message}`, "warn");
+    } finally {
+        state.mouseFlushing = false;
+        if(
+            !sendFailed &&
+            isCaptureReady() &&
+            (Math.abs(state.mouseDx) >= 1 ||
+                Math.abs(state.mouseDy) >= 1 ||
+                Math.abs(state.mouseWheel) >= 1)
+        ) {
+            scheduleMouseFlush(0);
+        }
+    }
+}
+
+function queueMouseMove(dx, dy) {
+    if(!isCaptureReady()) return;
+    state.mouseDx += dx * MOUSE_SENSITIVITY;
+    state.mouseDy += dy * MOUSE_SENSITIVITY;
+    scheduleMouseFlush();
+}
+
+async function setMouseButton(button, pressed) {
+    if(!state.connected || !state.fapVerified) return;
+
+    const next = pressed ? state.mouseButtons | button : state.mouseButtons & ~button;
+    if(next === state.mouseButtons) return;
+
+    const previous = state.mouseButtons;
+    state.mouseButtons = next;
+    try {
+        await sendMousePacket(next, 0, 0, 0, true);
+    } catch(error) {
+        state.mouseButtons = previous;
+        log(`Mouse button send failed: ${error.message}`, "warn");
+    }
+}
+
+async function clickMouseButton(button) {
+    if(!isCaptureReady()) return;
+    state.mouseDx = 0;
+    state.mouseDy = 0;
+    await setMouseButton(button, true);
+    await sleep(25);
+    await setMouseButton(button, false);
+}
+
+async function releaseMouseButtons() {
+    const hadButtons = state.mouseButtons !== 0;
+    state.mouseButtons = 0;
+    state.mouseDx = 0;
+    state.mouseDy = 0;
+    state.mouseWheel = 0;
+
+    if(!hadButtons || !state.connected || !state.fapVerified) return;
+    try {
+        await sendMousePacket(0, 0, 0, 0, true);
+    } catch(_) {
+        // The FAP releases mouse buttons on disconnect and web-session timeout.
+    }
+}
+
+function cancelPointerDrag() {
+    if(state.pointerId !== null) {
+        try {
+            if(els.pad.hasPointerCapture?.(state.pointerId)) {
+                els.pad.releasePointerCapture(state.pointerId);
+            }
+        } catch(_) {
+            // Pointer capture may already be gone.
+        }
+    }
+    state.pointerId = null;
+    state.pointerMoved = 0;
+    els.pad.classList.remove("capture-pad--dragging");
+}
+
+function onPadPointerDown(event) {
+    if(!isCaptureReady()) return;
+    if(event.pointerType === "mouse" && event.button !== 0) return;
+
+    event.preventDefault();
+    const wasFocused = document.activeElement === els.pad;
+    els.pad.focus();
+
+    state.pointerId = event.pointerId;
+    state.pointerWasFocused = wasFocused;
+    state.pointerLastX = event.clientX;
+    state.pointerLastY = event.clientY;
+    state.pointerMoved = 0;
+    state.pointerStart = performance.now();
+
+    try {
+        els.pad.setPointerCapture(event.pointerId);
+    } catch(_) {
+        // Older iOS WebKit may not expose pointer capture.
+    }
+    els.pad.classList.add("capture-pad--dragging");
+}
+
+function onPadPointerMove(event) {
+    if(state.pointerId !== event.pointerId || !isCaptureReady()) return;
+    event.preventDefault();
+
+    const dx = event.clientX - state.pointerLastX;
+    const dy = event.clientY - state.pointerLastY;
+    state.pointerLastX = event.clientX;
+    state.pointerLastY = event.clientY;
+    state.pointerMoved += Math.hypot(dx, dy);
+
+    if(state.pointerMoved >= 2) {
+        queueMouseMove(dx, dy);
+    }
+}
+
+function onPadPointerUp(event) {
+    if(state.pointerId !== event.pointerId) return;
+
+    const duration = performance.now() - state.pointerStart;
+    const tapped = state.pointerMoved < TAP_MAX_MOVE && duration < TAP_MAX_MS;
+    const wasFocused = state.pointerWasFocused;
+
+    event.preventDefault();
+    cancelPointerDrag();
+    state.pointerWasFocused = false;
+
+    if(tapped && wasFocused && isCaptureReady()) {
+        void clickMouseButton(MOUSE_BUTTON_LEFT);
+    }
+}
+
+function onPadPointerCancel(event) {
+    if(state.pointerId !== event.pointerId) return;
+    cancelPointerDrag();
+    state.pointerWasFocused = false;
+}
+
+function onPadContextMenu(event) {
+    event.preventDefault();
+    if(isCaptureReady()) {
+        void clickMouseButton(MOUSE_BUTTON_RIGHT);
+    }
+}
+
+function onPadWheel(event) {
+    if(!isCaptureReady()) return;
+    event.preventDefault();
+
+    // Browser deltaY is positive when scrolling down; HID wheel is positive up.
+    const delta = event.deltaMode === 0 ? -event.deltaY / 100 : -Math.sign(event.deltaY);
+    state.mouseWheel += delta;
+    scheduleMouseFlush();
+}
+
+function bindMouseButton(element, button) {
+    element.addEventListener("pointerdown", (event) => {
+        if(!isCaptureReady()) return;
+        event.preventDefault();
+        try {
+            element.setPointerCapture(event.pointerId);
+        } catch(_) {
+            // Ignore missing pointer capture.
+        }
+        void setMouseButton(button, true);
+    });
+
+    const release = (event) => {
+        event.preventDefault();
+        void setMouseButton(button, false);
+    };
+    element.addEventListener("pointerup", release);
+    element.addEventListener("pointercancel", release);
+    element.addEventListener("pointerleave", (event) => {
+        if(!element.hasPointerCapture?.(event.pointerId)) {
+            void setMouseButton(button, false);
+        }
+    });
+    element.addEventListener("lostpointercapture", () => {
+        void setMouseButton(button, false);
     });
 }
 
@@ -500,6 +780,9 @@ async function typePastedText() {
         setStatus("error", "Nothing to type", "No printable characters found.");
         return;
     }
+
+    cancelPointerDrag();
+    await releaseMouseButtons();
 
     const run = ++state.typingRun;
     state.typing = true;
@@ -589,6 +872,13 @@ function updateUsbFromLine(line) {
     const ready = match[1] === "1";
     if(ready !== state.usbReady) {
         state.usbReady = ready;
+        if(!ready) {
+            state.mouseButtons = 0;
+            state.mouseDx = 0;
+            state.mouseDy = 0;
+            state.mouseWheel = 0;
+            cancelPointerDrag();
+        }
         updateBridgeDetail();
         updateUI();
     }
@@ -713,6 +1003,8 @@ async function pingOnce() {
 function markBridgeLost(reason) {
     if(!state.connected) return;
 
+    void releaseMouseButtons();
+    cancelPointerDrag();
     state.fapVerified = false;
     state.usbReady = false;
     stopTyping();
@@ -1061,6 +1353,12 @@ function bindEvents() {
 
     els.pad.addEventListener("keydown", mappedKeyDown);
     els.pad.addEventListener("keyup", mappedKeyUp);
+    els.pad.addEventListener("pointerdown", onPadPointerDown);
+    els.pad.addEventListener("pointermove", onPadPointerMove);
+    els.pad.addEventListener("pointerup", onPadPointerUp);
+    els.pad.addEventListener("pointercancel", onPadPointerCancel);
+    els.pad.addEventListener("contextmenu", onPadContextMenu);
+    els.pad.addEventListener("wheel", onPadWheel, { passive: false });
     els.pad.addEventListener("click", () => {
         if(isCaptureReady()) els.pad.focus();
     });
@@ -1072,13 +1370,22 @@ function bindEvents() {
         }
     });
 
+    bindMouseButton(els.leftClickBtn, MOUSE_BUTTON_LEFT);
+    bindMouseButton(els.rightClickBtn, MOUSE_BUTTON_RIGHT);
+
     window.addEventListener("blur", () => {
+        cancelPointerDrag();
+        void releaseMouseButtons();
         if(state.pressed.size > 0) releaseAll("Window lost focus — keys released");
     });
 
     document.addEventListener("visibilitychange", () => {
-        if(document.hidden && state.pressed.size > 0 && !state.typing) {
-            releaseAll("Tab hidden — keys released");
+        if(document.hidden) {
+            cancelPointerDrag();
+            void releaseMouseButtons();
+            if(state.pressed.size > 0 && !state.typing) {
+                releaseAll("Tab hidden — keys released");
+            }
         }
     });
 

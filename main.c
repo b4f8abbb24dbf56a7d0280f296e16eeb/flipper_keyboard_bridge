@@ -30,6 +30,7 @@
 #define TAG "BleKbBridge"
 
 #define PACKET_MAGIC     0xA5
+#define MOUSE_MAGIC      0x4D // 'M'
 #define PACKET_SIZE      9
 #define MAX_KEYS         6
 #define EVENT_QUEUE_LEN  32
@@ -76,6 +77,7 @@ typedef struct {
 
     uint8_t mods;
     uint8_t keys[MAX_KEYS];
+    uint8_t mouse_buttons;
 
     char typing_log[TYPING_LOG_CAPACITY];
     size_t typing_log_len;
@@ -112,6 +114,11 @@ static void hid_release_all(App* app) {
     furi_hal_hid_kb_release_all();
     memset(app->keys, 0, sizeof(app->keys));
     app->mods = 0;
+
+    if(app->mouse_buttons) {
+        furi_hal_hid_mouse_release(app->mouse_buttons);
+        app->mouse_buttons = 0;
+    }
 }
 
 static bool web_client_active(App* app) {
@@ -199,6 +206,10 @@ static bool control_packet_valid(const uint8_t* packet) {
            checksum_valid(packet);
 }
 
+static bool mouse_packet_valid(const uint8_t* packet) {
+    return packet[0] == MOUSE_MAGIC && checksum_valid(packet);
+}
+
 static void bridge_send(App* app, const char* message) {
     if(!app->profile || !message) return;
 
@@ -253,6 +264,29 @@ static void handle_control_packet(App* app, const uint8_t* packet) {
         sequence,
         furi_hal_hid_is_connected() ? 1 : 0);
     bridge_send(app, message);
+}
+
+static void hid_apply_mouse_packet(App* app, const uint8_t* packet) {
+    uint8_t new_buttons = packet[1] & (HID_MOUSE_BTN_LEFT | HID_MOUSE_BTN_RIGHT | HID_MOUSE_BTN_WHEEL);
+    int8_t dx = (int8_t)packet[2];
+    int8_t dy = (int8_t)packet[3];
+    int8_t wheel = (int8_t)packet[4];
+
+    if(dx != 0 || dy != 0) {
+        furi_hal_hid_mouse_move(dx, dy);
+    }
+    if(wheel != 0) {
+        furi_hal_hid_mouse_scroll(wheel);
+    }
+
+    uint8_t changed = new_buttons ^ app->mouse_buttons;
+    if(changed != 0) {
+        uint8_t pressed = new_buttons & changed;
+        uint8_t released = app->mouse_buttons & changed;
+        if(pressed) furi_hal_hid_mouse_press(pressed);
+        if(released) furi_hal_hid_mouse_release(released);
+        app->mouse_buttons = new_buttons;
+    }
 }
 
 static void hid_apply_packet(App* app, const uint8_t* packet) {
@@ -631,6 +665,13 @@ static void app_handle_event(App* app, const AppEvent* event) {
     case AppEventTypeBtData:
         if(control_packet_valid(event->data)) {
             handle_control_packet(app, event->data);
+        } else if(mouse_packet_valid(event->data)) {
+            if(web_client_active(app)) {
+                hid_apply_mouse_packet(app, event->data);
+            } else {
+                hid_release_all(app);
+                FURI_LOG_W(TAG, "Ignoring mouse packet without web handshake");
+            }
         } else if(keyboard_packet_valid(event->data)) {
             if(web_client_active(app)) {
                 hid_apply_packet(app, event->data);

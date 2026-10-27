@@ -5,11 +5,11 @@
 A tiny two-part bridge:
 
 ```
-Chrome (Web Bluetooth, keyboard capture / paste box)
-        │  BLE serial: 9-byte HID states + HKB1 keepalive pings
+Chrome (Web Bluetooth, keyboard + trackpad / paste box)
+        │  BLE serial: keyboard states, mouse packets, HKB1 keepalive pings
         ▼
 Flipper Zero FAP
-        │  USB HID keyboard
+        │  USB HID keyboard + mouse
         ▼
 Target host
 ```
@@ -31,7 +31,7 @@ from one computer into another without switching input devices.
 | `icon.png` | 10×10 app icon |
 | `dist/ble_kb_bridge.fap` | Prebuilt FAP (official firmware SDK 1.5.1, API 88.2) |
 | `web/index.html` | Web Bluetooth UI |
-| `web/app.js` | Connection, keepalive verification, keyboard capture, paste typing |
+| `web/app.js` | Connection, keepalive verification, keyboard/mouse capture, paste typing |
 | `web/hid.js` | `KeyboardEvent.code` → USB HID usage mapping |
 | `web/hid.test.mjs` | Mapping/protocol unit tests |
 | `.github/workflows/pages.yml` | Publishes `web/` to GitHub Pages |
@@ -111,7 +111,9 @@ outside a secure context.
 7. Use either mode:
    - **Paste & type:** paste text and press **Type text**. Typing starts
      immediately.
-   - **Live keyboard:** click the capture pad and type.
+   - **Live keyboard + mouse:** click the pad to focus/type, drag to move the
+     cursor, tap to left-click, and use the Left/Right click buttons or scroll
+     over the pad for other mouse actions.
 8. Press **Release all**, **Stop**, or **Disconnect** when done.
 
 The Flipper screen shows BLE/USB state and a count of forwarded keys.
@@ -145,9 +147,11 @@ Only printable ASCII, newline, and tab are supported. Emoji, smart quotes, IME
 text, and other non-ASCII characters are rejected. The target host layout still
 applies.
 
-**Live keyboard** streams physical key positions as they happen. Both modes
-expect Chrome to be on a different device from the USB host; if Chrome is on the
-host, the injected keys can land back in the page.
+**Live keyboard + mouse** streams physical key positions and relative mouse
+movement. Drag the pad to move; tap after it is focused to left-click. The
+Left/Right click buttons send explicit clicks, and scrolling over the pad sends
+the wheel. Both modes expect Chrome to be on a different device from the USB
+host; if Chrome is on the host, injected input can land back in the page.
 
 ## Keyboard semantics
 
@@ -167,6 +171,9 @@ intercepted by a web page and are handled locally.
 Caps Lock and Num Lock are forwarded as key presses; their LED state belongs to
 the target host.
 
+Mouse movement is relative and uses the pad’s drag distance. Click buttons and
+wheel events are forwarded as USB HID mouse reports.
+
 ## Protocol
 
 The browser sends one full keyboard state per GATT write:
@@ -182,7 +189,22 @@ The Flipper diffs the new state against its current state and emits only the
 necessary `furi_hal_hid_kb_press` / `furi_hal_hid_kb_release` calls. This makes
 lost/duplicated key-up packets self-heal on the next state packet.
 
-A second 9-byte packet type is used for the proprietary keepalive:
+Mouse packets are also 9 bytes:
+
+```
+byte 0     0x4D 'M'
+byte 1     button mask (bit 0 left, bit 1 right, bit 2 middle)
+byte 2     relative X, signed int8
+byte 3     relative Y, signed int8
+byte 4     wheel steps, signed int8
+bytes 5-7  zero
+byte 8     XOR of bytes 0..7
+```
+
+The web client batches pointer movement at roughly 60 Hz and splits deltas to
+fit the signed-byte fields.
+
+A third 9-byte packet type is used for the proprietary keepalive:
 
 ```
 byte 0     0x48 'H'
@@ -231,8 +253,11 @@ required with current firmware.
   the Flipper settings, not the app name.
 - Configures the USB interface as HID with product name
   `BLE Keyboard Bridge` (VID/PID `046D:C529`).
-- Releases all keys on BLE disconnect, USB disconnect, app exit, or after five
+- Releases all keyboard keys and mouse buttons on BLE disconnect, USB
+  disconnect, web-session timeout, or app exit, and releases keys after five
   seconds without a state heartbeat while keys are held.
+- Handles mouse movement, left/right/middle buttons, and wheel deltas after the
+  web handshake is active.
 - Answers HKB1 PING packets and reports USB readiness on the serial TX
   characteristic.
 - Only calls the BLE link “active” after a recent HKB1 ping (five-second
@@ -248,8 +273,8 @@ required with current firmware.
 ## Testing done
 
 - FAP compiles cleanly with ufbt against official SDK 1.5.1 / API 88.2.
-- Web unit tests: `cd web && node --test hid.test.mjs` (12 tests, all passing),
-  including ASCII→HID mapping and the HKB1 packet.
+- Web unit tests: `cd web && node --test hid.test.mjs` (13 tests, all passing),
+  including ASCII→HID mapping, mouse packets, and the HKB1 packet.
 - JavaScript syntax checks for `web/app.js` and `web/hid.js`.
 - End-to-end BLE + USB HID testing on physical hardware is still pending in
   this workspace; the local Flipper CDC port was busy at the time of

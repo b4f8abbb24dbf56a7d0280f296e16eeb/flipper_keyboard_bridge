@@ -4,7 +4,7 @@
         <meta charset="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <meta name="theme-color" content="#0c0f12" />
-        <title>BLE Keyboard Bridge — Flipper Zero</title>
+        <title>BLE Keyboard + Mouse Bridge — Flipper Zero</title>
         <link rel="stylesheet" href="style.css" />
         <script type="module" src="app.js"></script>
     </head>
@@ -93,7 +93,7 @@
 
             <section class="panel" aria-labelledby="capture-title">
                 <div class="panel-heading">
-                    <h2 id="capture-title">Live keyboard</h2>
+                    <h2 id="capture-title">Live keyboard + mouse</h2>
                     <span class="hint">Physical keys · host layout applies</span>
                 </div>
 
@@ -101,25 +101,35 @@
                     id="capturePad"
                     class="capture-pad"
                     tabindex="0"
-                    role="textbox"
-                    aria-label="Keyboard capture area"
+                    role="application"
+                    aria-label="Live keyboard and trackpad"
                     aria-describedby="padHint"
                 >
                     <span class="pad-icon" aria-hidden="true">⌨</span>
-                    <strong id="padHint">Connect the Flipper to start</strong>
-                    <span class="pad-sub">Click here, then type. Click outside to pause.</span>
+                    <strong id="padHint">Connect for keyboard + trackpad</strong>
+                    <span class="pad-sub">Click to type · drag to move · tap to click</span>
+                </div>
+
+                <div class="mouse-row">
+                    <button id="leftClickBtn" class="btn" type="button" disabled>
+                        Left click
+                    </button>
+                    <button id="rightClickBtn" class="btn" type="button" disabled>
+                        Right click
+                    </button>
+                    <span class="hint">Scroll over the pad to wheel</span>
                 </div>
 
                 <div class="stats">
-                    <div><span>States</span><strong id="packets">0</strong></div>
+                    <div><span>Packets</span><strong id="packets">0</strong></div>
                     <div><span>Keys</span><strong id="keyCount">0</strong></div>
                     <div><span>Credit</span><strong id="bufferValue">0 B</strong></div>
                     <div><span>Pressed</span><strong id="pressedKeys">—</strong></div>
                 </div>
 
                 <p class="microcopy">
-                    Live capture needs Chrome on a different device from the USB host. On the same
-                    computer, use Paste &amp; type instead.
+                    Live keyboard and trackpad need Chrome on a different device from the USB host.
+                    First click focuses the pad; drag to move, tap to click.
                 </p>
             </section>
 

@@ -407,6 +407,17 @@ summary:focus-visible {
         inset 0 0 42px rgba(255, 130, 0, 0.04);
 }
 
+.capture-pad--locked {
+    border-color: var(--green);
+    cursor: none;
+    background:
+        radial-gradient(circle at 50% 35%, rgba(72, 214, 154, 0.16), transparent 52%),
+        var(--panel-soft);
+    box-shadow:
+        0 0 0 4px rgba(72, 214, 154, 0.08),
+        inset 0 0 42px rgba(72, 214, 154, 0.03);
+}
+
 .mouse-row {
     display: flex;
     flex-wrap: wrap;

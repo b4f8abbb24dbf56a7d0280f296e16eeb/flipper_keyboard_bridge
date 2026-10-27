@@ -111,9 +111,9 @@ outside a secure context.
 7. Use either mode:
    - **Paste & type:** paste text and press **Type text**. Typing starts
      immediately.
-   - **Live keyboard + mouse:** click the pad to focus/type, drag to move the
-     cursor, tap to left-click, and use the Left/Right click buttons or scroll
-     over the pad for other mouse actions.
+   - **Live keyboard + mouse:** click the pad to lock the cursor, move the mouse
+     normally, click/right-click or scroll, and press **Esc** to release the
+     cursor. On touch, drag to move and tap to click.
 8. Press **Release all**, **Stop**, or **Disconnect** when done.
 
 The Flipper screen shows BLE/USB state and a count of forwarded keys.
@@ -148,10 +148,13 @@ text, and other non-ASCII characters are rejected. The target host layout still
 applies.
 
 **Live keyboard + mouse** streams physical key positions and relative mouse
-movement. Drag the pad to move; tap after it is focused to left-click. The
-Left/Right click buttons send explicit clicks, and scrolling over the pad sends
-the wheel. Both modes expect Chrome to be on a different device from the USB
-host; if Chrome is on the host, injected input can land back in the page.
+movement. Click the pad once to lock the browser cursor, then move the mouse
+freely without holding a button. Click/right-click normally and scroll while
+locked; press **Esc** to release. On touch devices without pointer lock, drag
+the pad to move and tap to click. The Left/Right click buttons send explicit
+clicks when the cursor is not locked. Both modes expect Chrome to be on a
+different device from the USB host; if Chrome is on the host, injected input can
+land back in the page.
 
 ## Keyboard semantics
 
@@ -171,8 +174,9 @@ intercepted by a web page and are handled locally.
 Caps Lock and Num Lock are forwarded as key presses; their LED state belongs to
 the target host.
 
-Mouse movement is relative and uses the pad’s drag distance. Click buttons and
-wheel events are forwarded as USB HID mouse reports.
+Mouse movement is relative and uses locked-pointer movement (or touch drag
+where pointer lock is unavailable). Mouse buttons and wheel events are
+forwarded as USB HID mouse reports.
 
 ## Protocol
 

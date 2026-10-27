@@ -1,5 +1,6 @@
 import {
     MOUSE_BUTTON_LEFT,
+    MOUSE_BUTTON_MIDDLE,
     MOUSE_BUTTON_RIGHT,
     PACKET_SIZE,
     SERIAL_CAPACITY,
@@ -117,6 +118,12 @@ const state = {
     pointerMoved: 0,
     pointerStart: 0,
     pointerWasFocused: false,
+
+    pointerLocked: false,
+    pointerLockSupported: false,
+    pointerLockUnsupported: false,
+    pointerLockSuppressUntil: 0,
+    touchMode: false,
 };
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -176,10 +183,16 @@ function setCaptureVisual() {
         els.padHint.textContent = "Plug the Flipper into the host";
     } else if(state.typing) {
         els.padHint.textContent = "Typing pasted text…";
+    } else if(state.pointerLocked) {
+        els.padHint.textContent = "Mouse locked · Esc releases";
+    } else if(state.touchMode) {
+        els.padHint.textContent = "Drag to move · tap to click";
+    } else if(state.pointerLockUnsupported) {
+        els.padHint.textContent = "Drag to move · lock unavailable";
     } else if(focused) {
-        els.padHint.textContent = "Type · drag to move · tap to click";
+        els.padHint.textContent = "Type · click pad to lock mouse";
     } else {
-        els.padHint.textContent = "Click to type · drag to move";
+        els.padHint.textContent = "Click to lock cursor";
     }
 }
 
@@ -278,7 +291,15 @@ function resetConnectionState() {
     state.mouseFlushing = false;
     state.pointerId = null;
     state.pointerMoved = 0;
-    els.pad.classList.remove("capture-pad--dragging");
+    state.pointerLocked = false;
+    state.pointerLockSupported = false;
+    state.pointerLockUnsupported = false;
+    state.pointerLockSuppressUntil = 0;
+    state.touchMode = false;
+    els.pad.classList.remove("capture-pad--dragging", "capture-pad--locked");
+    if(document.pointerLockElement === els.pad) {
+        document.exitPointerLock?.();
+    }
 
     resolveFlowWaiters();
 }
@@ -627,9 +648,123 @@ function cancelPointerDrag() {
     els.pad.classList.remove("capture-pad--dragging");
 }
 
+function mouseButtonForEvent(event) {
+    if(event.button === 0) return MOUSE_BUTTON_LEFT;
+    if(event.button === 1) return MOUSE_BUTTON_MIDDLE;
+    if(event.button === 2) return MOUSE_BUTTON_RIGHT;
+    return 0;
+}
+
+function requestMouseLock() {
+    if(state.pointerLocked) return;
+
+    state.pointerLockSuppressUntil = performance.now() + 300;
+    if(!els.pad.requestPointerLock) {
+        state.pointerLockUnsupported = true;
+        setCaptureVisual();
+        log("Pointer lock is unavailable in this browser", "warn");
+        return;
+    }
+
+    try {
+        const request = els.pad.requestPointerLock();
+        if(request?.catch) {
+            request.catch((error) => {
+                state.pointerLockUnsupported = true;
+                setCaptureVisual();
+                log(`Pointer lock failed: ${error.message}`, "warn");
+            });
+        }
+    } catch(error) {
+        state.pointerLockUnsupported = true;
+        setCaptureVisual();
+        log(`Pointer lock failed: ${error.message}`, "warn");
+    }
+
+    setTimeout(() => {
+        if(!state.pointerLocked && !state.pointerLockSupported && !state.pointerLockUnsupported) {
+            state.pointerLockUnsupported = true;
+            setCaptureVisual();
+            log("Pointer lock did not engage; using drag fallback", "warn");
+        }
+    }, 900);
+}
+
+function onPointerLockChange() {
+    const locked = document.pointerLockElement === els.pad;
+    const wasLocked = state.pointerLocked;
+    state.pointerLocked = locked;
+    els.pad.classList.toggle("capture-pad--locked", locked);
+
+    if(locked) {
+        state.pointerLockSupported = true;
+        state.pointerLockUnsupported = false;
+        log("Cursor locked. Press Esc to release.");
+    } else if(wasLocked) {
+        void releaseMouseButtons();
+        log("Cursor released.");
+    }
+    setCaptureVisual();
+}
+
+function onPointerLockError() {
+    state.pointerLockUnsupported = true;
+    setCaptureVisual();
+    log("Pointer lock was rejected; using drag fallback", "warn");
+}
+
+function onLockedMouseMove(event) {
+    if(!state.pointerLocked || !isCaptureReady()) return;
+    queueMouseMove(event.movementX || 0, event.movementY || 0);
+}
+
+function onLockedMouseDown(event) {
+    if(!state.pointerLocked || !isCaptureReady()) return;
+    if(performance.now() < state.pointerLockSuppressUntil) return;
+
+    const button = mouseButtonForEvent(event);
+    if(button === 0) return;
+
+    event.preventDefault();
+    void setMouseButton(button, true);
+}
+
+function onLockedMouseUp(event) {
+    if(!state.pointerLocked) return;
+
+    const button = mouseButtonForEvent(event);
+    if(button === 0 || (state.mouseButtons & button) === 0) return;
+    event.preventDefault();
+    void setMouseButton(button, false);
+}
+
+function onLockedWheel(event) {
+    if(!state.pointerLocked || !isCaptureReady()) return;
+    event.preventDefault();
+
+    const delta = event.deltaMode === 0 ? -event.deltaY / 100 : -Math.sign(event.deltaY);
+    state.mouseWheel += delta;
+    scheduleMouseFlush();
+}
+
 function onPadPointerDown(event) {
     if(!isCaptureReady()) return;
     if(event.pointerType === "mouse" && event.button !== 0) return;
+
+    if(event.pointerType === "mouse") {
+        if(state.pointerLocked) return;
+        event.preventDefault();
+        els.pad.focus();
+        state.touchMode = false;
+
+        if(!state.pointerLockUnsupported) {
+            requestMouseLock();
+            return;
+        }
+    } else {
+        state.touchMode = true;
+        setCaptureVisual();
+    }
 
     event.preventDefault();
     const wasFocused = document.activeElement === els.pad;
@@ -689,13 +824,14 @@ function onPadPointerCancel(event) {
 
 function onPadContextMenu(event) {
     event.preventDefault();
+    if(state.pointerLocked) return;
     if(isCaptureReady()) {
         void clickMouseButton(MOUSE_BUTTON_RIGHT);
     }
 }
 
 function onPadWheel(event) {
-    if(!isCaptureReady()) return;
+    if(!isCaptureReady() || state.pointerLocked) return;
     event.preventDefault();
 
     // Browser deltaY is positive when scrolling down; HID wheel is positive up.
@@ -783,6 +919,9 @@ async function typePastedText() {
 
     cancelPointerDrag();
     await releaseMouseButtons();
+    if(state.pointerLocked) {
+        document.exitPointerLock?.();
+    }
 
     const run = ++state.typingRun;
     state.typing = true;
@@ -878,6 +1017,9 @@ function updateUsbFromLine(line) {
             state.mouseDy = 0;
             state.mouseWheel = 0;
             cancelPointerDrag();
+            if(state.pointerLocked) {
+                document.exitPointerLock?.();
+            }
         }
         updateBridgeDetail();
         updateUI();
@@ -1005,6 +1147,9 @@ function markBridgeLost(reason) {
 
     void releaseMouseButtons();
     cancelPointerDrag();
+    if(state.pointerLocked) {
+        document.exitPointerLock?.();
+    }
     state.fapVerified = false;
     state.usbReady = false;
     stopTyping();
@@ -1295,6 +1440,12 @@ function disconnect() {
 }
 
 function mappedKeyDown(event) {
+    if(state.pointerLocked && event.code === "Escape") {
+        event.preventDefault();
+        document.exitPointerLock?.();
+        return;
+    }
+
     if(!isCaptureReady()) return;
     if(document.activeElement !== els.pad) return;
     if(event.isComposing || event.key === "Process") return;
@@ -1362,6 +1513,31 @@ function bindEvents() {
     els.pad.addEventListener("click", () => {
         if(isCaptureReady()) els.pad.focus();
     });
+
+    document.addEventListener("pointerlockchange", onPointerLockChange);
+    document.addEventListener("pointerlockerror", onPointerLockError);
+    document.addEventListener("mousemove", onLockedMouseMove);
+    document.addEventListener("mousedown", onLockedMouseDown);
+    document.addEventListener("mouseup", onLockedMouseUp);
+    document.addEventListener(
+        "keydown",
+        (event) => {
+            if(state.pointerLocked && event.code === "Escape") {
+                event.preventDefault();
+                event.stopPropagation();
+                document.exitPointerLock?.();
+            }
+        },
+        true,
+    );
+    document.addEventListener(
+        "wheel",
+        onLockedWheel,
+        { passive: false },
+    );
+    document.addEventListener("contextmenu", (event) => {
+        if(state.pointerLocked) event.preventDefault();
+    });
     els.pad.addEventListener("focus", setCaptureVisual);
     els.pad.addEventListener("blur", () => {
         setCaptureVisual();
@@ -1376,6 +1552,9 @@ function bindEvents() {
     window.addEventListener("blur", () => {
         cancelPointerDrag();
         void releaseMouseButtons();
+        if(state.pointerLocked) {
+            document.exitPointerLock?.();
+        }
         if(state.pressed.size > 0) releaseAll("Window lost focus — keys released");
     });
 
@@ -1383,6 +1562,9 @@ function bindEvents() {
         if(document.hidden) {
             cancelPointerDrag();
             void releaseMouseButtons();
+            if(state.pointerLocked) {
+                document.exitPointerLock?.();
+            }
             if(state.pressed.size > 0 && !state.typing) {
                 releaseAll("Tab hidden — keys released");
             }

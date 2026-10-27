@@ -29,10 +29,14 @@
 
 #define TAG "BleKbBridge"
 
-#define PACKET_MAGIC    0xA5
-#define PACKET_SIZE     9
-#define MAX_KEYS        6
-#define EVENT_QUEUE_LEN 32
+#define PACKET_MAGIC     0xA5
+#define PACKET_SIZE      9
+#define MAX_KEYS         6
+#define EVENT_QUEUE_LEN  32
+
+#define CONTROL_MAGIC    0x48 // 'H'
+#define CONTROL_VERSION  1
+#define CONTROL_PING     1
 
 #define WATCHDOG_MS 5000
 #define USB_RETRY_MS 1000
@@ -101,14 +105,71 @@ static void hid_release_all(App* app) {
     app->mods = 0;
 }
 
-static bool packet_valid(const uint8_t* packet) {
-    if(packet[0] != PACKET_MAGIC) return false;
-
+static bool checksum_valid(const uint8_t* packet) {
     uint8_t checksum = 0;
     for(size_t i = 0; i < PACKET_SIZE - 1; i++) {
         checksum ^= packet[i];
     }
     return checksum == packet[PACKET_SIZE - 1];
+}
+
+static bool keyboard_packet_valid(const uint8_t* packet) {
+    return packet[0] == PACKET_MAGIC && checksum_valid(packet);
+}
+
+static bool control_packet_valid(const uint8_t* packet) {
+    return packet[0] == CONTROL_MAGIC && packet[1] == 'K' && packet[2] == 'B' &&
+           packet[3] == CONTROL_VERSION && packet[4] == CONTROL_PING &&
+           checksum_valid(packet);
+}
+
+static void bridge_send(App* app, const char* message) {
+    if(!app->profile || !message) return;
+
+    size_t length = strlen(message);
+    if(length == 0) return;
+    if(length > BLE_PROFILE_SERIAL_PACKET_SIZE_MAX) {
+        length = BLE_PROFILE_SERIAL_PACKET_SIZE_MAX;
+    }
+
+    ble_profile_serial_tx(app->profile, (uint8_t*)message, (uint16_t)length);
+}
+
+static void bridge_send_ready(App* app) {
+    char message[40];
+    snprintf(
+        message,
+        sizeof(message),
+        "HKB1 READY USB=%u\r\n",
+        furi_hal_hid_is_connected() ? 1 : 0);
+    bridge_send(app, message);
+}
+
+static void bridge_send_usb(App* app) {
+    char message[32];
+    snprintf(
+        message,
+        sizeof(message),
+        "HKB1 USB=%u\r\n",
+        furi_hal_hid_is_connected() ? 1 : 0);
+    bridge_send(app, message);
+}
+
+static void handle_control_packet(App* app, const uint8_t* packet) {
+    if(packet[4] != CONTROL_PING) return;
+
+    uint16_t session = (uint16_t)packet[5] | ((uint16_t)packet[6] << 8);
+    uint8_t sequence = packet[7];
+
+    char message[80];
+    snprintf(
+        message,
+        sizeof(message),
+        "HKB1 PONG %04X %u USB=%u\r\n",
+        (unsigned)session,
+        sequence,
+        furi_hal_hid_is_connected() ? 1 : 0);
+    bridge_send(app, message);
 }
 
 static void hid_apply_packet(App* app, const uint8_t* packet) {
@@ -368,7 +429,7 @@ static void app_draw_callback(Canvas* canvas, void* context) {
     } else if(typing) {
         hint = "Typing...";
     } else {
-        hint = "Click pad and type";
+        hint = "Use web app";
     }
     canvas_draw_str(canvas, 2, 58, hint);
 }
@@ -398,6 +459,7 @@ static void app_tick(App* app) {
         if(ready != app->usb_ready) {
             app->usb_ready = ready;
             hid_release_all(app);
+            bridge_send_usb(app);
             FURI_LOG_I(TAG, "USB HID %s", ready ? "connected" : "disconnected");
             ui_update(app, true);
         }
@@ -426,6 +488,7 @@ static void app_handle_event(App* app, const AppEvent* event) {
         app->ble_connected = true;
         app->last_rx_tick = furi_get_tick();
         bt_arm_serial_callback(app);
+        bridge_send_ready(app);
         hid_release_all(app);
         FURI_LOG_I(TAG, "Central connected");
         break;
@@ -439,11 +502,14 @@ static void app_handle_event(App* app, const AppEvent* event) {
     case AppEventTypeBtReset:
         app->ble_connected = true;
         bt_arm_serial_callback(app);
+        bridge_send_ready(app);
         hid_release_all(app);
         break;
 
     case AppEventTypeBtData:
-        if(packet_valid(event->data)) {
+        if(control_packet_valid(event->data)) {
+            handle_control_packet(app, event->data);
+        } else if(keyboard_packet_valid(event->data)) {
             hid_apply_packet(app, event->data);
             app->last_rx_tick = furi_get_tick();
         } else {

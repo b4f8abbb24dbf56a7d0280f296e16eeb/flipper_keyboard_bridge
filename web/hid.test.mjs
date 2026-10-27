@@ -2,15 +2,20 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+    CONTROL_MAGIC,
     MAX_KEYS,
     PACKET_SIZE,
     SERIAL_CAPACITY,
+    asciiToHid,
+    buildHidStatePacket,
+    buildPingPacket,
     buildStatePacket,
     isMappedCode,
     keyUsages,
     modifierMask,
     packetChecksum,
     parseFlowCredit,
+    textToKeystrokes,
 } from "./hid.js";
 
 test("maps common physical keys", () => {
@@ -78,4 +83,50 @@ test("flow control falls back to little-endian or capacity", () => {
 
 test("packet size divides the serial flow-control window exactly", () => {
     assert.equal(SERIAL_CAPACITY % PACKET_SIZE, 0);
+});
+
+test("builds a raw HID state packet", () => {
+    const packet = buildHidStatePacket(0x02, [0x04, 0x05, 0x06]);
+    assert.equal(packet.length, PACKET_SIZE);
+    assert.equal(packet[0], 0xa5);
+    assert.equal(packet[1], 0x02);
+    assert.deepEqual([...packet.slice(2, 8)], [0x04, 0x05, 0x06, 0, 0, 0]);
+    assert.equal(packet[8], packetChecksum(packet));
+});
+
+test("maps printable ASCII to HID keystrokes", () => {
+    assert.deepEqual(asciiToHid("a"), { usage: 0x04, mods: 0, label: "a" });
+    assert.deepEqual(asciiToHid("A"), { usage: 0x04, mods: 0x02, label: "A" });
+    assert.deepEqual(asciiToHid("1"), { usage: 0x1e, mods: 0, label: "1" });
+    assert.deepEqual(asciiToHid("!"), { usage: 0x1e, mods: 0x02, label: "!" });
+    assert.deepEqual(asciiToHid("?"), { usage: 0x38, mods: 0x02, label: "?" });
+    assert.deepEqual(asciiToHid("\n"), { usage: 0x28, mods: 0, label: "Enter" });
+    assert.deepEqual(asciiToHid("\t"), { usage: 0x2b, mods: 0, label: "Tab" });
+
+    for(let code = 32; code <= 126; code++) {
+        const char = String.fromCharCode(code);
+        const action = asciiToHid(char);
+        assert.ok(action, `missing mapping for ${JSON.stringify(char)}`);
+        assert.ok(action.usage >= 0x04 && action.usage <= 0x64);
+    }
+});
+
+test("rejects non-ASCII paste content", () => {
+    const { actions, unsupported } = textToKeystrokes("Hi 👋\n");
+    assert.equal(actions.length, 4);
+    assert.deepEqual(actions.map((action) => action.label), ["H", "i", "Space", "Enter"]);
+    assert.deepEqual(unsupported, ["👋"]);
+});
+
+test("builds a proprietary keepalive packet", () => {
+    const packet = buildPingPacket(0x1234, 7);
+    assert.equal(packet[0], CONTROL_MAGIC);
+    assert.equal(packet[1], 0x4b);
+    assert.equal(packet[2], 0x42);
+    assert.equal(packet[3], 1);
+    assert.equal(packet[4], 1);
+    assert.equal(packet[5], 0x34);
+    assert.equal(packet[6], 0x12);
+    assert.equal(packet[7], 7);
+    assert.equal(packet[8], packetChecksum(packet));
 });

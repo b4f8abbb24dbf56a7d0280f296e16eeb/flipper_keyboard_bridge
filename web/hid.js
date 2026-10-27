@@ -10,6 +10,10 @@ export const PACKET_SIZE = 9;
 export const MAX_KEYS = 6;
 export const SERIAL_CAPACITY = 486;
 
+export const CONTROL_MAGIC = 0x48;
+export const CONTROL_VERSION = 1;
+export const CONTROL_PING = 1;
+
 export const MODIFIER_CODES = Object.freeze({
     ControlLeft: 0x01,
     ShiftLeft: 0x02,
@@ -191,24 +195,155 @@ export function keyUsages(codes, limit = MAX_KEYS) {
 }
 
 /**
+ * Build a full-state packet from already-resolved HID values.
+ * @param {number} mods HID modifier byte
+ * @param {Iterable<number>} usages HID keyboard usage IDs
+ * @returns {Uint8Array}
+ */
+export function buildHidStatePacket(mods, usages) {
+    const packet = new Uint8Array(PACKET_SIZE);
+    packet[0] = PACKET_MAGIC;
+    packet[1] = mods & 0xff;
+
+    const unique = [];
+    for(const rawUsage of usages) {
+        const usage = rawUsage & 0xff;
+        if(usage === 0) continue;
+        if(usage >= 0xe0 && usage <= 0xe7) continue;
+        if(unique.includes(usage)) continue;
+        unique.push(usage);
+        if(unique.length >= MAX_KEYS) break;
+    }
+
+    for(let i = 0; i < unique.length; i++) {
+        packet[2 + i] = unique[i];
+    }
+    packet[PACKET_SIZE - 1] = packetChecksum(packet);
+    return packet;
+}
+
+/**
  * Build the 9-byte "full keyboard state" packet consumed by the FAP.
  * @param {Iterable<string>} codes pressed KeyboardEvent.code values
  * @returns {Uint8Array}
  */
 export function buildStatePacket(codes) {
+    return buildHidStatePacket(modifierMask(codes), keyUsages(codes));
+}
+
+/**
+ * Build the proprietary keepalive packet:
+ *   H K B <version> <PING> <session lo> <session hi> <seq> XOR
+ * @param {number} session 16-bit random session id
+ * @param {number} sequence 8-bit sequence number
+ * @returns {Uint8Array}
+ */
+export function buildPingPacket(session, sequence) {
     const packet = new Uint8Array(PACKET_SIZE);
-    packet[0] = PACKET_MAGIC;
-    packet[1] = modifierMask(codes);
-    const usages = keyUsages(codes);
-    for(let i = 0; i < usages.length; i++) {
-        packet[2 + i] = usages[i];
-    }
-    let checksum = 0;
-    for(let i = 0; i < PACKET_SIZE - 1; i++) {
-        checksum ^= packet[i];
-    }
-    packet[PACKET_SIZE - 1] = checksum;
+    packet[0] = CONTROL_MAGIC;
+    packet[1] = 0x4b; // K
+    packet[2] = 0x42; // B
+    packet[3] = CONTROL_VERSION;
+    packet[4] = CONTROL_PING;
+    packet[5] = session & 0xff;
+    packet[6] = (session >> 8) & 0xff;
+    packet[7] = sequence & 0xff;
+    packet[PACKET_SIZE - 1] = packetChecksum(packet);
     return packet;
+}
+
+const ASCII_PUNCTUATION_TO_HID = Object.freeze({
+    "!": { usage: 0x1e, shift: true },
+    '"': { usage: 0x34, shift: true },
+    "#": { usage: 0x20, shift: true },
+    "$": { usage: 0x21, shift: true },
+    "%": { usage: 0x22, shift: true },
+    "&": { usage: 0x24, shift: true },
+    "'": { usage: 0x34, shift: false },
+    "(": { usage: 0x26, shift: true },
+    ")": { usage: 0x27, shift: true },
+    "*": { usage: 0x25, shift: true },
+    "+": { usage: 0x2e, shift: true },
+    ",": { usage: 0x36, shift: false },
+    "-": { usage: 0x2d, shift: false },
+    ".": { usage: 0x37, shift: false },
+    "/": { usage: 0x38, shift: false },
+    ":": { usage: 0x33, shift: true },
+    ";": { usage: 0x33, shift: false },
+    "<": { usage: 0x36, shift: true },
+    "=": { usage: 0x2e, shift: false },
+    ">": { usage: 0x37, shift: true },
+    "?": { usage: 0x38, shift: true },
+    "@": { usage: 0x1f, shift: true },
+    "[": { usage: 0x2f, shift: false },
+    "\\": { usage: 0x31, shift: false },
+    "]": { usage: 0x30, shift: false },
+    "^": { usage: 0x23, shift: true },
+    "_": { usage: 0x2d, shift: true },
+    "`": { usage: 0x35, shift: false },
+    "{": { usage: 0x2f, shift: true },
+    "|": { usage: 0x31, shift: true },
+    "}": { usage: 0x30, shift: true },
+    "~": { usage: 0x35, shift: true },
+});
+
+/**
+ * Map one ASCII character to a single HID keystroke.
+ * Newline and tab are treated as Enter and Tab. Non-ASCII characters,
+ * emoji and unsupported control characters return null.
+ *
+ * @param {string} char
+ * @returns {{usage: number, mods: number, label: string}|null}
+ */
+export function asciiToHid(char) {
+    if(char === "\n") return { usage: 0x28, mods: 0, label: "Enter" };
+    if(char === "\t") return { usage: 0x2b, mods: 0, label: "Tab" };
+    if(char === " ") return { usage: 0x2c, mods: 0, label: "Space" };
+
+    const code = char.codePointAt(0);
+    if(code >= 97 && code <= 122) {
+        return { usage: 0x04 + (code - 97), mods: 0, label: char };
+    }
+    if(code >= 65 && code <= 90) {
+        return { usage: 0x04 + (code - 65), mods: 0x02, label: char };
+    }
+    if(code >= 48 && code <= 57) {
+        const usage = code === 48 ? 0x27 : 0x1e + (code - 49);
+        return { usage, mods: 0, label: char };
+    }
+
+    const punctuation = ASCII_PUNCTUATION_TO_HID[char];
+    if(punctuation) {
+        return {
+            usage: punctuation.usage,
+            mods: punctuation.shift ? 0x02 : 0,
+            label: char,
+        };
+    }
+
+    return null;
+}
+
+/**
+ * Convert ASCII text into an ordered list of HID keystrokes.
+ * @param {string} text
+ * @returns {{actions: Array<{usage: number, mods: number, label: string}>, unsupported: string[]}}
+ */
+export function textToKeystrokes(text) {
+    const actions = [];
+    const unsupported = [];
+
+    for(const char of text) {
+        if(char === "\r") continue;
+        const action = asciiToHid(char);
+        if(action) {
+            actions.push(action);
+        } else {
+            unsupported.push(char);
+        }
+    }
+
+    return { actions, unsupported };
 }
 
 /**

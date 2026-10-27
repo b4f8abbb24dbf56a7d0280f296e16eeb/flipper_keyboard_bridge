@@ -1,19 +1,29 @@
 import {
     PACKET_SIZE,
     SERIAL_CAPACITY,
+    buildHidStatePacket,
+    buildPingPacket,
     buildStatePacket,
     isMappedCode,
     parseFlowCredit,
+    textToKeystrokes,
 } from "./hid.js";
 
 const SERVICE_UUID = "8fe5b3d5-2e7f-4a98-2a48-7acc60fe0000";
 const RX_UUID = "19ed82ae-ed21-4c9d-4145-228e62fe0000";
+const TX_UUID = "19ed82ae-ed21-4c9d-4145-228e61fe0000";
 const FLOW_UUID = "19ed82ae-ed21-4c9d-4145-228e63fe0000";
 
 const FLOW_WAIT_MS = 1200;
 const FLOW_POLL_MS = 400;
 const HEARTBEAT_MS = 1000;
+const PING_INTERVAL_MS = 2000;
+const PONG_TIMEOUT_MS = 7000;
 const MAX_LOG_ENTRIES = 80;
+const MAX_PASTE_CHARS = 5000;
+const TYPE_PRESS_MS = 40;
+const TYPE_RELEASE_MS = 15;
+const BRIDGE_PREFIX = "HKB1";
 
 const $ = (id) => document.getElementById(id);
 
@@ -27,16 +37,22 @@ const els = {
     releaseBtn: $("releaseBtn"),
     allDevicesBtn: $("allDevicesBtn"),
     deviceName: $("deviceName"),
+    usbStatus: $("usbStatus"),
     pad: $("capturePad"),
     padHint: $("padHint"),
     pressedKeys: $("pressedKeys"),
     packets: $("packets"),
     keyCount: $("keyCount"),
     bufferValue: $("bufferValue"),
+    pasteBox: $("pasteBox"),
+    pasteInfo: $("pasteInfo"),
+    typeTextBtn: $("typeTextBtn"),
+    stopTypingBtn: $("stopTypingBtn"),
+    typeProgress: $("typeProgress"),
+    countdownToggle: $("countdownToggle"),
     log: $("log"),
     clearLogBtn: $("clearLogBtn"),
     supportWarning: $("supportWarning"),
-    modeHint: $("modeHint"),
 };
 
 const boundDevices = new WeakSet();
@@ -44,6 +60,7 @@ const boundDevices = new WeakSet();
 const state = {
     device: null,
     rx: null,
+    tx: null,
     flow: null,
     connected: false,
     connecting: false,
@@ -51,6 +68,7 @@ const state = {
     credit: SERIAL_CAPACITY,
     capacity: SERIAL_CAPACITY,
     writing: false,
+    pumping: false,
     stateDirty: false,
     packets: 0,
     keys: 0,
@@ -59,6 +77,23 @@ const state = {
     writeMode: "unknown",
     expectedDisconnect: false,
     supported: true,
+
+    fapVerified: false,
+    usbReady: false,
+    txNotifying: false,
+    session: 0,
+    pingSeq: 0,
+    lastPongSeq: -1,
+    pingTimer: null,
+    pinging: false,
+    lastPongAt: 0,
+
+    typing: false,
+    typingCancel: false,
+    typingRun: 0,
+    typingTotal: 0,
+    typingIndex: 0,
+    typingDone: 0,
 };
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -92,13 +127,24 @@ function setStatus(kind, text, detail = "") {
     els.statusDetail.textContent = detail;
 }
 
+function isCaptureReady() {
+    return state.connected && state.fapVerified && !state.typing;
+}
+
 function setCaptureVisual() {
     const focused = document.activeElement === els.pad;
-    els.pad.classList.toggle("capture-pad--focused", focused);
-    els.pad.classList.toggle("capture-pad--muted", !state.connected);
+    const ready = isCaptureReady();
+    els.pad.classList.toggle("capture-pad--focused", focused && ready);
+    els.pad.classList.toggle("capture-pad--muted", !ready);
 
     if(!state.connected) {
         els.padHint.textContent = "Connect the Flipper to start";
+    } else if(state.connecting) {
+        els.padHint.textContent = "Verifying the Flipper app…";
+    } else if(!state.fapVerified) {
+        els.padHint.textContent = "Bridge not verified";
+    } else if(state.typing) {
+        els.padHint.textContent = "Typing pasted text…";
     } else if(focused) {
         els.padHint.textContent = "Listening — type now";
     } else {
@@ -117,45 +163,73 @@ function updatePressedKeys() {
         .join(" + ");
 }
 
+function updatePasteInfo() {
+    els.pasteInfo.textContent = `${els.pasteBox.value.length} / ${MAX_PASTE_CHARS}`;
+}
+
 function updateStats() {
     els.packets.textContent = String(state.packets);
     els.keyCount.textContent = String(state.keys);
     els.bufferValue.textContent = `${state.credit} B`;
     els.deviceName.textContent = state.device?.name || "No device selected";
+    els.usbStatus.textContent = state.connected
+        ? state.usbReady
+            ? "READY"
+            : "NOT CONNECTED"
+        : "—";
     updatePressedKeys();
 }
 
 function updateButtons() {
     els.connectBtn.disabled = !state.supported || state.connecting || state.connected;
-    els.chooseBtn.disabled = !state.supported || state.connecting;
+    els.chooseBtn.disabled = !state.supported || state.connecting || state.connected;
     els.disconnectBtn.disabled = !state.connected;
-    els.releaseBtn.disabled = !state.connected;
+    els.releaseBtn.disabled = !state.connected || state.typing;
     els.allDevicesBtn.disabled = !state.supported;
+    els.typeTextBtn.disabled =
+        !state.connected || !state.fapVerified || state.typing || state.connecting;
+    els.stopTypingBtn.disabled = !state.typing;
+    els.countdownToggle.disabled = state.typing;
+    els.pasteBox.disabled = state.typing;
+
     els.connectBtn.textContent = state.connecting
         ? "Connecting…"
         : state.device && !state.connected
           ? "Reconnect"
           : "Connect Flipper";
     els.chooseBtn.hidden = !state.device;
-    els.modeHint.textContent =
-        "Live mode forwards physical key presses. The host keyboard layout decides the characters.";
 }
 
 function updateUI() {
     updateStats();
     updateButtons();
     setCaptureVisual();
+    updatePasteInfo();
 }
 
 function resetConnectionState() {
+    stopKeepalive();
     state.connected = false;
     state.rx = null;
+    state.tx = null;
     state.flow = null;
     state.pressed.clear();
     state.credit = 0;
     state.capacity = SERIAL_CAPACITY;
     state.notificationsStarted = false;
     state.stateDirty = false;
+    state.fapVerified = false;
+    state.usbReady = false;
+    state.txNotifying = false;
+    state.pinging = false;
+    state.lastPongAt = 0;
+    state.lastPongSeq = -1;
+    state.session = 0;
+    state.pingSeq = 0;
+    state.typingRun++;
+    state.typing = false;
+    state.typingCancel = true;
+    if(els.typeProgress) els.typeProgress.textContent = "Ready";
     resolveFlowWaiters();
 }
 
@@ -238,8 +312,13 @@ async function waitForCredit(bytes) {
     }
 }
 
-async function writePacket(packet) {
+async function writePacket(packet, forceResponse = false) {
     if(!state.rx) throw new Error("No RX characteristic");
+
+    if(forceResponse) {
+        await state.rx.writeValue(packet);
+        return;
+    }
 
     if(state.writeMode !== "response" && state.rx.properties.writeWithoutResponse) {
         try {
@@ -256,71 +335,427 @@ async function writePacket(packet) {
     state.writeMode = "response";
 }
 
-async function pump() {
-    if(state.writing || !state.connected) return;
+async function acquireGatt() {
+    while(state.writing) {
+        await sleep(5);
+    }
     state.writing = true;
+}
+
+function releaseGatt() {
+    state.writing = false;
+}
+
+async function withGatt(task) {
+    await acquireGatt();
+    try {
+        return await task();
+    } finally {
+        releaseGatt();
+    }
+}
+
+function handleSendError(error) {
+    log(`Send failed: ${error.name}: ${error.message}`, "error");
+
+    if(
+        error.name === "NetworkError" ||
+        error.name === "InvalidStateError" ||
+        /disconnect|not connected/i.test(error.message)
+    ) {
+        state.expectedDisconnect = true;
+        state.device?.gatt?.disconnect();
+        resetConnectionState();
+        setStatus("error", "BLE link lost", "Reconnect to continue.");
+        updateUI();
+    } else if(error.name === "SecurityError" || /auth|pair/i.test(error.message)) {
+        state.expectedDisconnect = true;
+        state.device?.gatt?.disconnect();
+        resetConnectionState();
+        setStatus(
+            "error",
+            "Pairing problem",
+            "Confirm the PIN on the Flipper, or pair it in system Bluetooth settings and reconnect.",
+        );
+        log(
+            "Pairing/security error. Confirm the PIN on the Flipper. If no prompt appears, pair the Flipper in the OS Bluetooth settings first.",
+            "error",
+        );
+        updateUI();
+    } else {
+        setStatus("error", "Send failed", error.message);
+    }
+}
+
+async function pump() {
+    if(!state.connected || state.pumping) return;
+    state.pumping = true;
 
     try {
-        while(state.connected && state.stateDirty) {
+        while(state.connected && state.stateDirty && !state.typing) {
             state.stateDirty = false;
-            await waitForCredit(PACKET_SIZE);
-            if(!state.connected) break;
+            await withGatt(async () => {
+                if(!state.connected || state.typing) return;
+                await waitForCredit(PACKET_SIZE);
+                if(!state.connected || state.typing) return;
 
-            const packet = buildStatePacket(state.pressed);
-            await writePacket(packet);
-
-            state.credit = Math.max(0, state.credit - packet.length);
-            state.packets++;
-            updateStats();
+                const packet = buildStatePacket(state.pressed);
+                await writePacket(packet);
+                state.credit = Math.max(0, state.credit - packet.length);
+                state.packets++;
+                updateStats();
+            });
         }
     } catch(error) {
-        log(`Send failed: ${error.name}: ${error.message}`, "error");
-        if(
-            error.name === "NetworkError" ||
-            error.name === "InvalidStateError" ||
-            /disconnect|not connected/i.test(error.message)
-        ) {
-            state.expectedDisconnect = true;
-            state.device?.gatt?.disconnect();
-            resetConnectionState();
-            setStatus("error", "BLE link lost", "Reconnect to continue.");
-            updateUI();
-        } else if(error.name === "SecurityError" || /auth|pair/i.test(error.message)) {
-            state.expectedDisconnect = true;
-            state.device?.gatt?.disconnect();
-            resetConnectionState();
-            setStatus(
-                "error",
-                "Pairing problem",
-                "Confirm the PIN on the Flipper, or pair it in system Bluetooth settings and reconnect.",
-            );
-            log(
-                "Pairing/security error. Confirm the PIN on the Flipper. If no prompt appears, pair the Flipper in the OS Bluetooth settings first.",
-                "error",
-            );
-            updateUI();
-        } else {
-            setStatus("error", "Send failed", error.message);
-        }
+        handleSendError(error);
     } finally {
-        state.writing = false;
-        if(state.connected && state.stateDirty) {
+        state.pumping = false;
+        if(state.connected && state.stateDirty && !state.typing) {
             void pump();
         }
     }
 }
 
 function sendState() {
-    if(!state.connected) return;
+    if(!state.connected || state.typing) return;
     state.stateDirty = true;
     void pump();
 }
 
 function releaseAll(reason = "Keys released") {
+    if(state.typing) {
+        stopTyping();
+        return;
+    }
     state.pressed.clear();
     sendState();
     updateUI();
     if(reason) log(reason);
+}
+
+async function sendExactState(mods, usages, forceResponse = false) {
+    if(!state.connected) throw new Error("Disconnected");
+    await withGatt(async () => {
+        if(!state.connected) throw new Error("Disconnected");
+        await waitForCredit(PACKET_SIZE);
+        if(!state.connected) throw new Error("Disconnected");
+
+        const packet = buildHidStatePacket(mods, usages);
+        await writePacket(packet, forceResponse);
+        state.credit = Math.max(0, state.credit - packet.length);
+        state.packets++;
+        updateStats();
+    });
+}
+
+function stopTyping() {
+    if(!state.typing) return;
+    state.typingCancel = true;
+    els.typeProgress.textContent = "Stopping…";
+    log("Stopping typing…", "warn");
+}
+
+async function typePastedText() {
+    if(!state.connected || !state.fapVerified || state.typing) return;
+
+    const text = els.pasteBox.value
+        .replace(/\r\n/g, "\n")
+        .replace(/\r/g, "\n");
+
+    if(text.length === 0) {
+        setStatus("error", "Nothing to type", "Paste or type some text first.");
+        els.pasteBox.focus();
+        return;
+    }
+    if(text.length > MAX_PASTE_CHARS) {
+        setStatus("error", "Text is too long", `Limit is ${MAX_PASTE_CHARS} characters.`);
+        return;
+    }
+
+    const { actions, unsupported } = textToKeystrokes(text);
+    if(unsupported.length > 0) {
+        const preview = unsupported.slice(0, 8).join("");
+        setStatus(
+            "error",
+            "Unsupported characters",
+            `ASCII only. Remove: ${preview}${unsupported.length > 8 ? "…" : ""}`,
+        );
+        log(`Paste rejected: ${unsupported.length} unsupported character(s)`, "warn");
+        return;
+    }
+    if(actions.length === 0) {
+        setStatus("error", "Nothing to type", "No printable characters found.");
+        return;
+    }
+
+    const run = ++state.typingRun;
+    state.typing = true;
+    state.typingCancel = false;
+    state.typingTotal = actions.length;
+    state.typingIndex = 0;
+    state.typingDone = 0;
+    state.pressed.clear();
+    state.stateDirty = false;
+    setStatus(
+        "connected",
+        "Connected",
+        `Typing ${actions.length} character${actions.length === 1 ? "" : "s"} via USB HID`,
+    );
+    log(`Typing ${actions.length} character(s) as USB HID`);
+    updateUI();
+
+    let completed = false;
+    let failed = false;
+
+    try {
+        await sendExactState(0, [], true);
+        if(state.typingCancel || state.typingRun !== run) throw new Error("Cancelled");
+
+        if(els.countdownToggle.checked) {
+            for(let remaining = 3; remaining > 0; remaining--) {
+                if(state.typingCancel || !state.connected || state.typingRun !== run) {
+                    throw new Error("Cancelled");
+                }
+                els.typeProgress.textContent = `Starting in ${remaining}…`;
+                await sleep(1000);
+            }
+        }
+
+        for(let i = 0; i < actions.length; i++) {
+            if(state.typingCancel || !state.connected || state.typingRun !== run) {
+                throw new Error("Cancelled");
+            }
+
+            state.typingIndex = i;
+            els.typeProgress.textContent = `Typing ${i + 1} / ${actions.length}`;
+            const action = actions[i];
+
+            await sendExactState(action.mods, [action.usage], true);
+            await sleep(TYPE_PRESS_MS);
+            await sendExactState(0, [], true);
+            await sleep(TYPE_RELEASE_MS);
+            state.typingDone = i + 1;
+        }
+
+        completed = !state.typingCancel && state.typingDone >= actions.length;
+    } catch(error) {
+        if(
+            state.typingRun === run &&
+            error.message !== "Cancelled" &&
+            state.connected &&
+            !state.expectedDisconnect
+        ) {
+            failed = true;
+            log(`Typing failed: ${error.message}`, "error");
+            handleSendError(error);
+        }
+    } finally {
+        if(state.typingRun !== run) return;
+
+        if(state.connected) {
+            try {
+                await sendExactState(0, [], true);
+            } catch(_) {
+                // The disconnect path already released keys on the Flipper.
+            }
+        }
+
+        state.typing = false;
+        state.typingCancel = false;
+        els.typeProgress.textContent = completed
+            ? `Typed ${actions.length} character${actions.length === 1 ? "" : "s"}`
+            : `Stopped at ${state.typingDone} / ${actions.length}`;
+        log(completed ? "Paste typing complete" : "Paste typing stopped");
+        updateUI();
+        if(!failed) updateBridgeDetail();
+    }
+}
+
+function newSessionToken() {
+    if(globalThis.crypto?.getRandomValues) {
+        const value = new Uint16Array(1);
+        crypto.getRandomValues(value);
+        return value[0] || 1;
+    }
+    return (Math.floor(Math.random() * 0xffff) + 1) & 0xffff;
+}
+
+function updateUsbFromLine(line) {
+    const match = /\bUSB=([01])\b/.exec(line);
+    if(!match) return;
+    const ready = match[1] === "1";
+    if(ready !== state.usbReady) {
+        state.usbReady = ready;
+        updateStats();
+        updateBridgeDetail();
+    }
+}
+
+function processBridgeText(text, expectedSession, expectedSequence) {
+    let matched = false;
+
+    for(const rawLine of text.split(/\r?\n/)) {
+        const line = rawLine.trim();
+        if(!line.startsWith(BRIDGE_PREFIX)) continue;
+
+        updateUsbFromLine(line);
+
+        const match = /^HKB1\s+PONG\s+([0-9A-Fa-f]{4})\s+(\d+)\b/.exec(line);
+        if(!match) continue;
+
+        const session = parseInt(match[1], 16);
+        const sequence = Number(match[2]);
+        if(session === expectedSession && sequence === expectedSequence) {
+            matched = true;
+        }
+    }
+
+    return matched;
+}
+
+function updateBridgeDetail() {
+    if(!state.connected || state.connecting || !state.fapVerified) return;
+    setStatus(
+        "connected",
+        "Connected",
+        `Verified BLE Keyboard Bridge · USB ${state.usbReady ? "READY" : "not connected"}`,
+    );
+}
+
+async function readTxText() {
+    if(!state.tx) return "";
+    const value = await state.tx.readValue();
+    return new TextDecoder().decode(value);
+}
+
+function onTxStatus(event) {
+    if(!state.connected || !state.tx || !event.target.value) return;
+    const text = new TextDecoder().decode(event.target.value);
+    const matched = processBridgeText(text, state.session, state.pingSeq);
+
+    if(!matched) return;
+
+    const wasVerified = state.fapVerified;
+    state.fapVerified = true;
+    state.lastPongAt = Date.now();
+    state.lastPongSeq = state.pingSeq;
+    if(!wasVerified) {
+        log("Bridge verified with HKB1 indication");
+    }
+    updateBridgeDetail();
+    updateUI();
+}
+
+async function pingOnce() {
+    if(!state.connected || !state.tx) return false;
+
+    const sequence = state.pingSeq = (state.pingSeq + 1) & 0xff;
+    const packet = buildPingPacket(state.session, sequence);
+
+    await withGatt(async () => {
+        if(!state.connected) throw new Error("Disconnected");
+        await waitForCredit(PACKET_SIZE);
+        if(!state.connected) throw new Error("Disconnected");
+        await writePacket(packet);
+        state.credit = Math.max(0, state.credit - packet.length);
+    });
+
+    for(let attempt = 0; attempt < 2 && state.connected; attempt++) {
+        await sleep(attempt === 0 ? 70 : 100);
+
+        if(state.lastPongSeq === sequence) {
+            state.lastPongAt = Date.now();
+            updateBridgeDetail();
+            updateUI();
+            return true;
+        }
+
+        let text = "";
+        try {
+            text = await withGatt(readTxText);
+        } catch(error) {
+            log(`Status read failed: ${error.message}`, "warn");
+            return false;
+        }
+
+        if(processBridgeText(text, state.session, sequence)) {
+            const wasVerified = state.fapVerified;
+            state.fapVerified = true;
+            state.lastPongAt = Date.now();
+            state.lastPongSeq = sequence;
+
+            if(!wasVerified) {
+                log("Bridge verified with HKB1 ping/pong");
+            }
+            updateBridgeDetail();
+            updateUI();
+            return true;
+        }
+    }
+
+    return false;
+}
+
+function markBridgeLost(reason) {
+    if(!state.connected) return;
+
+    state.fapVerified = false;
+    state.usbReady = false;
+    stopTyping();
+    state.pressed.clear();
+    state.stateDirty = true;
+    void pump();
+    setStatus(
+        "error",
+        "Bridge not responding",
+        `${reason}. Open BLE Keyboard Bridge on the Flipper, then reconnect.`,
+    );
+    log(`Bridge verification lost: ${reason}`, "error");
+    updateUI();
+}
+
+function stopKeepalive() {
+    if(state.pingTimer) {
+        clearInterval(state.pingTimer);
+        state.pingTimer = null;
+    }
+}
+
+function startKeepalive() {
+    stopKeepalive();
+    state.pingTimer = setInterval(() => {
+        void keepalivePing();
+    }, PING_INTERVAL_MS);
+}
+
+async function keepalivePing() {
+    if(!state.connected || state.pinging) return;
+
+    state.pinging = true;
+    try {
+        await pingOnce();
+
+        if(
+            state.connected &&
+            state.fapVerified &&
+            !state.typing &&
+            Date.now() - state.lastPongAt > PONG_TIMEOUT_MS
+        ) {
+            markBridgeLost("Keepalive timed out");
+        }
+    } catch(error) {
+        handleSendError(error);
+    } finally {
+        state.pinging = false;
+    }
+}
+
+async function verifyBridge() {
+    for(let attempt = 0; attempt < 3 && state.connected; attempt++) {
+        if(await pingOnce()) return true;
+        if(attempt < 2) await sleep(250);
+    }
+    return false;
 }
 
 function chooseDevice(showAll = false) {
@@ -382,6 +817,7 @@ async function connectToDevice(device) {
 
         const service = await server.getPrimaryService(SERVICE_UUID);
         const rx = await service.getCharacteristic(RX_UUID);
+        const tx = await service.getCharacteristic(TX_UUID);
         const flow = await service.getCharacteristic(FLOW_UUID);
 
         // RX is authenticated. Reading it (and the zero-state probe below)
@@ -403,9 +839,13 @@ async function connectToDevice(device) {
         })();
 
         state.rx = rx;
+        state.tx = tx;
         state.flow = flow;
         state.credit = initialCredit > 0 ? initialCredit : SERIAL_CAPACITY;
         state.capacity = state.credit;
+        state.session = newSessionToken();
+        state.pingSeq = 0;
+        state.lastPongAt = 0;
 
         try {
             await flow.startNotifications();
@@ -416,6 +856,17 @@ async function connectToDevice(device) {
             log(`Flow notifications unavailable: ${error.message}`, "warn");
         }
 
+        // Optional: indications give instant USB status. Reading TX after each
+        // ping still works if indications are unavailable.
+        try {
+            await tx.startNotifications();
+            tx.addEventListener("characteristicvaluechanged", onTxStatus);
+            state.txNotifying = true;
+            log("Bridge status indications enabled");
+        } catch(error) {
+            log(`TX indications unavailable; using reads (${error.message})`, "warn");
+        }
+
         // Give the FAP's main loop a moment to reclaim the serial callback
         // after the BT service's connect-time RPC setup.
         await sleep(250);
@@ -424,18 +875,37 @@ async function connectToDevice(device) {
         // the Flipper release any keys left over from a previous session.
         await rx.writeValue(buildStatePacket([]));
         state.credit = Math.max(0, state.credit - PACKET_SIZE);
-        log("Keyboard link verified");
+        log("Zero-state probe sent");
 
         state.connected = true;
-        state.connecting = false;
+        state.connecting = true;
         state.expectedDisconnect = false;
+        state.fapVerified = false;
+        state.usbReady = false;
+        setStatus(
+            "connecting",
+            "Verifying bridge…",
+            "Waiting for the proprietary HKB1 handshake.",
+        );
+        updateUI();
+
+        if(!(await verifyBridge())) {
+            throw new Error(
+                "BLE Keyboard Bridge did not answer the HKB1 handshake. Open the app on the Flipper and reconnect.",
+            );
+        }
+
+        state.connecting = false;
+        state.fapVerified = true;
+        state.lastPongAt = Date.now();
+        startKeepalive();
         setStatus(
             "connected",
             "Connected",
-            `${device.name || "Flipper"} — make sure the Flipper screen shows USB READY.`,
+            `Verified BLE Keyboard Bridge · USB ${state.usbReady ? "READY" : "not connected"}`,
         );
         updateUI();
-        log("Ready. Click the capture pad and type (host layout applies).");
+        log("Bridge verified. Live capture and paste mode are ready.");
 
         // Focus must happen after the connection click finishes.
         setTimeout(() => {
@@ -514,7 +984,7 @@ function disconnect() {
 }
 
 function mappedKeyDown(event) {
-    if(!state.connected) return;
+    if(!isCaptureReady()) return;
     if(document.activeElement !== els.pad) return;
     if(event.isComposing || event.key === "Process") return;
 
@@ -555,15 +1025,25 @@ function bindEvents() {
     els.allDevicesBtn.addEventListener("click", () => void connect(true, true));
     els.disconnectBtn.addEventListener("click", disconnect);
     els.releaseBtn.addEventListener("click", () => releaseAll("Release-all sent"));
+    els.typeTextBtn.addEventListener("click", () => void typePastedText());
+    els.stopTypingBtn.addEventListener("click", stopTyping);
 
     els.clearLogBtn.addEventListener("click", () => {
         els.log.replaceChildren();
     });
 
+    els.pasteBox.addEventListener("input", updatePasteInfo);
+    els.pasteBox.addEventListener("keydown", (event) => {
+        if((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+            event.preventDefault();
+            void typePastedText();
+        }
+    });
+
     els.pad.addEventListener("keydown", mappedKeyDown);
     els.pad.addEventListener("keyup", mappedKeyUp);
     els.pad.addEventListener("click", () => {
-        if(state.connected) els.pad.focus();
+        if(isCaptureReady()) els.pad.focus();
     });
     els.pad.addEventListener("focus", setCaptureVisual);
     els.pad.addEventListener("blur", () => {
@@ -578,13 +1058,13 @@ function bindEvents() {
     });
 
     document.addEventListener("visibilitychange", () => {
-        if(document.hidden && state.pressed.size > 0) {
+        if(document.hidden && state.pressed.size > 0 && !state.typing) {
             releaseAll("Tab hidden — keys released");
         }
     });
 
     setInterval(() => {
-        if(state.connected && state.pressed.size > 0) {
+        if(state.connected && state.fapVerified && !state.typing && state.pressed.size > 0) {
             sendState();
         }
     }, HEARTBEAT_MS);
@@ -594,7 +1074,7 @@ function checkSupport() {
     const problems = [];
     if(!window.isSecureContext) {
         problems.push(
-            "This page is not a secure context. Serve it from https:// or http://localhost.",
+            "This page is not a secure context. Open the GitHub Pages HTTPS URL.",
         );
     }
     if(!("bluetooth" in navigator)) {

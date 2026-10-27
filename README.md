@@ -5,8 +5,8 @@
 A tiny two-part bridge:
 
 ```
-Chrome (Web Bluetooth, keyboard capture)
-        │  BLE serial, 9-byte HID state packets
+Chrome (Web Bluetooth, keyboard capture / paste box)
+        │  BLE serial: 9-byte HID states + HKB1 keepalive pings
         ▼
 Flipper Zero FAP
         │  USB HID keyboard
@@ -30,7 +30,7 @@ from one computer into another without switching input devices.
 | `application.fam` | FAP manifest |
 | `dist/ble_kb_bridge.fap` | Prebuilt FAP (official firmware SDK 1.5.1, API 88.2) |
 | `web/index.html` | Web Bluetooth UI |
-| `web/app.js` | Connection, flow control, keyboard capture |
+| `web/app.js` | Connection, keepalive verification, keyboard capture, paste typing |
 | `web/hid.js` | `KeyboardEvent.code` → USB HID usage mapping |
 | `web/hid.test.mjs` | Mapping/protocol unit tests |
 | `.github/workflows/pages.yml` | Publishes `web/` to GitHub Pages |
@@ -43,8 +43,9 @@ from one computer into another without switching input devices.
 - Chrome or Edge with Web Bluetooth. On desktop/laptop, Chrome. On mobile,
   Chrome on Android. Safari/Firefox do not support Web Bluetooth.
 - USB cable from the Flipper to the **target** host.
-- Chrome must run on a **different device** from the target host. See
-  [Same-host feedback loop](#same-host-feedback-loop).
+- For **live keyboard** capture, Chrome must run on a **different device** from
+  the target host. **Paste & type** can be used on the same computer. See
+  [Paste mode vs live mode](#paste-mode-vs-live-mode).
 
 The target host does not need any software. It sees a standard USB keyboard.
 
@@ -103,8 +104,13 @@ outside a secure context.
 4. Choose the device whose name starts with `Flipper` (the advertised name is
    usually `Flipper <name>`).
 5. Confirm the pairing PIN shown on the Flipper in the OS pairing dialog.
-6. Click the big capture pad on the web page, then type.
-7. Click outside the pad, press **Release all**, or press **Disconnect** to stop.
+6. Wait for **Verified BLE Keyboard Bridge** in the web app. This is the HKB1
+   handshake, not just a successful BLE connection.
+7. Use either mode:
+   - **Paste & type:** paste text, press **Type text**, and switch to the target
+     window during the 3-second head start.
+   - **Live keyboard:** click the capture pad and type.
+8. Press **Release all**, **Stop**, or **Disconnect** when done.
 
 The Flipper screen shows BLE/USB state and a count of forwarded keys.
 
@@ -123,19 +129,31 @@ If the PIN prompt never appears:
 - On Linux, check that your BlueZ pairing agent is running. On Windows, remove
   the old device in Bluetooth settings and retry.
 
-## Same-host feedback loop
+## Paste mode vs live mode
 
-The browser captures keys from the device it runs on. The Flipper injects keys
-into the USB host. If Chrome and the USB host are the **same computer**, the
-injected HID events can land back in the web page and be captured again.
+**Paste & type** is the safe mode for using Chrome on the same computer as the
+USB host:
 
-Use a second device for Chrome, or use a dedicated target machine. This is not
-a limitation of the BLE link; it is how a keyboard bridge works.
+1. Paste or type text into the box.
+2. Keep **3s head start** checked.
+3. Press **Type text**.
+4. Switch to the target app/window during the countdown.
+
+The page sends acknowledged HID key states with a deliberate hold/release gap,
+so the host sees real keystrokes. Only printable ASCII, newline, and tab are
+supported. Emoji, smart quotes, IME text, and other non-ASCII characters are
+rejected. The target host layout still applies.
+
+**Live keyboard** streams physical key positions as they happen. It requires
+Chrome to stay focused, so if Chrome and the USB host are the same computer,
+injected keys can land back in the page and be captured again. Use a second
+device for live capture, or use paste mode.
 
 ## Keyboard semantics
 
-The web app maps `KeyboardEvent.code` (physical key position) to USB HID usage
-IDs. The **target host's** keyboard layout determines the resulting character:
+Live mode maps `KeyboardEvent.code` (physical key position) to USB HID usage
+IDs. Paste mode maps printable ASCII to US-layout HID positions. The **target
+host's** keyboard layout determines the resulting character:
 
 - On a QWERTY host, the physical `A` key produces `a`.
 - On an AZERTY host, the same physical position produces `q`.
@@ -164,12 +182,38 @@ The Flipper diffs the new state against its current state and emits only the
 necessary `furi_hal_hid_kb_press` / `furi_hal_hid_kb_release` calls. This makes
 lost/duplicated key-up packets self-heal on the next state packet.
 
+A second 9-byte packet type is used for the proprietary keepalive:
+
+```
+byte 0     0x48 'H'
+byte 1     0x4B 'K'
+byte 2     0x42 'B'
+byte 3     protocol version (1)
+byte 4     command (1 = PING)
+bytes 5-6  16-bit session id, little-endian
+byte 7     8-bit sequence
+byte 8     XOR of bytes 0..7
+```
+
+The FAP answers with a status line on the serial TX characteristic:
+
+```
+HKB1 PONG <session-hex> <sequence> USB=<0|1>
+```
+
+The web page sends a PING on connect, requires a matching PONG before enabling
+either input mode, and repeats it every two seconds. This verifies that the
+connected serial profile belongs to the BLE Keyboard Bridge FAP, not another
+Flipper app. Missing replies for seven seconds disable input and show a
+“bridge not responding” state.
+
 The BLE serial service uses Flipper's proprietary service/characteristics:
 
 | Item | UUID |
 | --- | --- |
 | Service | `8fe5b3d5-2e7f-4a98-2a48-7acc60fe0000` |
 | Browser → Flipper RX | `19ed82ae-ed21-4c9d-4145-228e62fe0000` |
+| Flipper → browser TX | `19ed82ae-ed21-4c9d-4145-228e61fe0000` |
 | Flow control | `19ed82ae-ed21-4c9d-4145-228e63fe0000` |
 
 The serial flow-control window is 486 bytes. A 9-byte packet was chosen so the
@@ -189,13 +233,16 @@ required with current firmware.
   `BLE Keyboard Bridge` (VID/PID `046D:C529`).
 - Releases all keys on BLE disconnect, USB disconnect, app exit, or after five
   seconds without a state heartbeat while keys are held.
+- Answers HKB1 PING packets and reports USB readiness on the serial TX
+  characteristic.
 - Press **Back** to exit. Press **OK** to release all keys; if Bluetooth was off
   at launch, OK also retries starting the BLE profile.
 
 ## Testing done
 
 - FAP compiles cleanly with ufbt against official SDK 1.5.1 / API 88.2.
-- Web unit tests: `cd web && node --test hid.test.mjs` (8 tests, all passing).
+- Web unit tests: `cd web && node --test hid.test.mjs` (12 tests, all passing),
+  including ASCII→HID mapping and the HKB1 packet.
 - JavaScript syntax checks for `web/app.js` and `web/hid.js`.
 - End-to-end BLE + USB HID testing on physical hardware is still pending in
   this workspace; the local Flipper CDC port was busy at the time of
@@ -214,9 +261,16 @@ required with current firmware.
   is stuck. Click the capture pad so it has focus. Confirm the target host sees
   a new USB keyboard.
 
+**Bridge not verified / not responding**
+: The BLE serial profile connected, but the BLE Keyboard Bridge FAP did not
+  answer the HKB1 handshake. Launch the FAP on the Flipper and reconnect. This
+  can also happen if the Flipper mobile app or qFlipper is holding the BLE
+  connection.
+
 **Wrong characters**
-: The target host's layout is being applied to physical key positions. Switch
-  the host layout or expect QWERTY-position output.
+: The target host's layout is being applied. Paste mode sends US-layout ASCII
+  key positions; live mode sends physical key positions. Switch the host layout
+  or expect QWERTY-position output.
 
 **Stuck keys**
 : Press **Release all** or click outside the capture pad. The FAP also releases

@@ -38,10 +38,11 @@
 #define CONTROL_VERSION  1
 #define CONTROL_PING     1
 
-#define WATCHDOG_MS 5000
-#define USB_RETRY_MS 1000
-#define USB_POLL_MS 250
-#define UI_REFRESH_MS 100
+#define WEB_PING_TIMEOUT_MS 10000
+#define WATCHDOG_MS          5000
+#define USB_RETRY_MS         1000
+#define USB_POLL_MS          250
+#define UI_REFRESH_MS        100
 
 typedef enum {
     AppEventTypeBtConnected,
@@ -76,9 +77,11 @@ typedef struct {
     uint32_t packets;
     uint32_t keys_sent;
     uint32_t last_rx_tick;
+    uint32_t last_web_ping_tick;
     uint32_t last_usb_poll;
     uint32_t last_usb_retry;
     uint32_t last_ui_tick;
+    bool web_active;
 
     atomic_bool emergency_release;
     bool running;
@@ -103,6 +106,11 @@ static void hid_release_all(App* app) {
     furi_hal_hid_kb_release_all();
     memset(app->keys, 0, sizeof(app->keys));
     app->mods = 0;
+}
+
+static bool web_client_active(App* app) {
+    return app->last_web_ping_tick != 0 &&
+           (furi_get_tick() - app->last_web_ping_tick <= WEB_PING_TIMEOUT_MS);
 }
 
 static bool checksum_valid(const uint8_t* packet) {
@@ -157,6 +165,13 @@ static void bridge_send_usb(App* app) {
 
 static void handle_control_packet(App* app, const uint8_t* packet) {
     if(packet[4] != CONTROL_PING) return;
+
+    app->last_web_ping_tick = furi_get_tick();
+    if(!app->web_active) {
+        app->web_active = true;
+        ui_update(app, true);
+        FURI_LOG_I(TAG, "Web client handshake active");
+    }
 
     uint16_t session = (uint16_t)packet[5] | ((uint16_t)packet[6] << 8);
     uint8_t sequence = packet[7];
@@ -375,11 +390,13 @@ static void app_draw_callback(Canvas* canvas, void* context) {
     bool ble_ok = false;
     if(!app->profile) {
         ble_state = "OFF";
-    } else if(app->ble_connected) {
-        ble_state = "CONNECTED";
+    } else if(!app->ble_connected) {
+        ble_state = "WAITING";
+    } else if(app->web_active) {
+        ble_state = "WEB OK";
         ble_ok = true;
     } else {
-        ble_state = "WAITING";
+        ble_state = "LINK ONLY";
     }
 
     const char* usb_state;
@@ -424,6 +441,8 @@ static void app_draw_callback(Canvas* canvas, void* context) {
         hint = "Enable BT, then OK";
     } else if(!app->ble_connected) {
         hint = "Pair from Chrome";
+    } else if(!app->web_active) {
+        hint = "Open web app";
     } else if(!app->usb_ready) {
         hint = "Plug USB into host";
     } else if(typing) {
@@ -465,6 +484,16 @@ static void app_tick(App* app) {
         }
     }
 
+    bool web_active = web_client_active(app);
+    if(web_active != app->web_active) {
+        app->web_active = web_active;
+        if(!web_active) {
+            hid_release_all(app);
+            FURI_LOG_I(TAG, "Web client handshake timed out");
+        }
+        ui_update(app, true);
+    }
+
     bool has_keys = app->mods != 0;
     for(size_t i = 0; i < MAX_KEYS; i++) {
         if(app->keys[i]) has_keys = true;
@@ -486,21 +515,27 @@ static void app_handle_event(App* app, const AppEvent* event) {
     switch(event->type) {
     case AppEventTypeBtConnected:
         app->ble_connected = true;
+        app->web_active = false;
+        app->last_web_ping_tick = 0;
         app->last_rx_tick = furi_get_tick();
         bt_arm_serial_callback(app);
         bridge_send_ready(app);
         hid_release_all(app);
-        FURI_LOG_I(TAG, "Central connected");
+        FURI_LOG_I(TAG, "Central connected (waiting for web handshake)");
         break;
 
     case AppEventTypeBtDisconnected:
         app->ble_connected = false;
+        app->web_active = false;
+        app->last_web_ping_tick = 0;
         hid_release_all(app);
         FURI_LOG_I(TAG, "Central disconnected");
         break;
 
     case AppEventTypeBtReset:
         app->ble_connected = true;
+        app->web_active = false;
+        app->last_web_ping_tick = 0;
         bt_arm_serial_callback(app);
         bridge_send_ready(app);
         hid_release_all(app);
@@ -510,8 +545,13 @@ static void app_handle_event(App* app, const AppEvent* event) {
         if(control_packet_valid(event->data)) {
             handle_control_packet(app, event->data);
         } else if(keyboard_packet_valid(event->data)) {
-            hid_apply_packet(app, event->data);
-            app->last_rx_tick = furi_get_tick();
+            if(web_client_active(app)) {
+                hid_apply_packet(app, event->data);
+                app->last_rx_tick = furi_get_tick();
+            } else {
+                hid_release_all(app);
+                FURI_LOG_W(TAG, "Ignoring keyboard packet without web handshake");
+            }
         } else {
             FURI_LOG_W(TAG, "Bad packet");
         }

@@ -757,6 +757,11 @@ function startKeepalive() {
 async function keepalivePing() {
     if(!state.connected || state.pinging) return;
 
+    if(!state.device?.gatt?.connected) {
+        finishDisconnect("Flipper disconnected.");
+        return;
+    }
+
     state.pinging = true;
     try {
         await pingOnce();

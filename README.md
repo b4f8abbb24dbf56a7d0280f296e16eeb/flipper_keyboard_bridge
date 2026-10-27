@@ -235,6 +235,9 @@ required with current firmware.
   seconds without a state heartbeat while keys are held.
 - Answers HKB1 PING packets and reports USB readiness on the serial TX
   characteristic.
+- Only calls the BLE link “active” after a recent HKB1 ping. The screen shows
+  `WAITING`, `LINK ONLY`, or `WEB OK`; a connection from the Flipper mobile app,
+  OS Bluetooth, or another client shows `LINK ONLY` and cannot inject keys.
 - Press **Back** to exit. Press **OK** to release all keys; if Bluetooth was off
   at launch, OK also retries starting the BLE profile.
 
@@ -266,6 +269,11 @@ required with current firmware.
   answer the HKB1 handshake. Launch the FAP on the Flipper and reconnect. This
   can also happen if the Flipper mobile app or qFlipper is holding the BLE
   connection.
+
+**Flipper says `LINK ONLY`**
+: Some BLE central is connected, but it is not the web page (or the page is not
+  sending pings). Close the Flipper mobile app/other Bluetooth clients, open the
+  page, and connect there. The Flipper only shows `WEB OK` after the handshake.
 
 **Wrong characters**
 : The target host's layout is being applied. Paste mode sends US-layout ASCII
